@@ -1,0 +1,97 @@
+strategies:
+  - name: ma_cross
+    enabled: true
+    param_space_by_interval:
+      "1d":
+        short_window: [3, 5, 8, 10]
+        long_window: [15, 20, 30, 40]
+      "1h":
+        short_window: [8, 12, 16]
+        long_window: [32, 48, 64]
+      "1m":
+        short_window: [5, 8, 12]
+        long_window: [15, 20, 30]
+    default_params_by_interval:
+      "1d": { short_window: 5, long_window: 20 }
+      "1h": { short_window: 12, long_window: 48 }
+      "1m": { short_window: 5, long_window: 20 }
+
+  - name: macd
+    enabled: true
+    param_space_by_interval:
+      "1d":
+        fast: [8, 10, 12]
+        slow: [20, 26, 30]
+        signal: [7, 9, 11]
+      "1h":
+        fast: [10, 12, 14]
+        slow: [22, 26, 30]
+        signal: [7, 9]
+      "1m":
+        fast: [8, 12]
+        slow: [20, 26]
+        signal: [7, 9]
+    default_params_by_interval:
+      "1d": { fast: 12, slow: 26, signal: 9 }
+      "1h": { fast: 12, slow: 26, signal: 9 }
+      "1m": { fast: 12, slow: 26, signal: 9 }
+
+  - name: rsi
+    enabled: true
+    param_space_by_interval:
+      "1d":
+        period: [9, 14, 21]
+        oversold: [25, 30, 35]
+        overbought: [65, 70, 75]
+      "1h":
+        period: [9, 14]
+        oversold: [25, 30]
+        overbought: [70, 75]
+      "1m":
+        period: [9, 14]
+        oversold: [25, 30]
+        overbought: [70, 75]
+    default_params_by_interval:
+      "1d": { period: 14, oversold: 30, overbought: 70 }
+      "1h": { period: 14, oversold: 30, overbought: 70 }
+      "1m": { period: 14, oversold: 30, overbought: 70 }
+
+  - name: turtle_signal
+    enabled: true
+    param_space_by_interval:
+      "1d":
+        entry_window: [15, 20, 25, 30]
+        exit_window: [8, 10, 12]
+        atr_window: [14, 20, 26]
+      "1h":
+        entry_window: [20, 30, 40]
+        exit_window: [10, 15, 20]
+        atr_window: [14, 20, 26]
+      "1m":
+        entry_window: [20, 30, 40]
+        exit_window: [10, 15, 20]
+        atr_window: [14, 20]
+    default_params_by_interval:
+      "1d": { entry_window: 20, exit_window: 10, atr_window: 20 }
+      "1h": { entry_window: 30, exit_window: 15, atr_window: 20 }
+      "1m": { entry_window: 30, exit_window: 15, atr_window: 20 }
+
+  - name: king_keltner
+    enabled: true
+    param_space_by_interval:
+      "1d":
+        kk_length: [8, 11, 14, 20]
+        kk_dev: [1.2, 1.6, 2.0]
+        trailing_percent: [0.5, 0.8, 1.0, 1.5]
+      "1h":
+        kk_length: [11, 14, 20]
+        kk_dev: [1.2, 1.6, 2.0]
+        trailing_percent: [0.5, 0.8, 1.0]
+      "1m":
+        kk_length: [11, 14, 20]
+        kk_dev: [1.2, 1.6]
+        trailing_percent: [0.5, 0.8, 1.0]
+    default_params_by_interval:
+      "1d": { kk_length: 11, kk_dev: 1.6, trailing_percent: 0.8 }
+      "1h": { kk_length: 14, kk_dev: 1.6, trailing_percent: 0.8 }
+      "1m": { kk_length: 14, kk_dev: 1.6, trailing_percent: 0.8 }

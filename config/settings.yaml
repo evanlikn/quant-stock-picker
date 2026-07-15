@@ -1,0 +1,114 @@
+total_capital: 200000
+max_single_position_pct: 0.30
+per_strategy_weight: 0.10
+# single_choice: 每个策略按 max_single_position_pct 给建议（三选一）
+# multi_strategy: 每个策略按 per_strategy_weight 给建议（可能同时跟 N 个，合计约 per_strategy_weight × N）
+position_mode: single_choice
+lot_size:
+  cn: 100
+  us: 1
+  hk: 100
+
+scheduler:
+  timezone: "Asia/Shanghai"
+  # 各市场日 K 收盘后独立更新与推送（北京时间）
+  market_daily_run:
+    cn:
+      time: "15:35"   # A 股 15:00 收盘
+      days: "mon-fri"
+    hk:
+      time: "16:35"   # 港股 16:00 收盘
+      days: "mon-fri"
+    us:
+      time: "09:00"   # 美股前一交易日深夜收盘，次日上午更新
+      days: "mon-sat"
+  # 兼容旧配置；未设置 market_daily_run 时仅用于 A 股
+  daily_run_time: "15:35"
+  # 后台定时更新周期；默认仅日K。需要 60分/1分 请加入下方列表并重启 scheduler
+  auto_sync_intervals:
+    - "1d"
+  initial_history:
+    "1d": "730d"
+    "1h": "60d"
+    "1m": "5d"
+  wfo_retrain_check: true
+  allow_manual_retrain: true
+  trading_hours:
+    cn:
+      sessions:
+        - ["09:30", "11:30"]
+        - ["13:00", "15:00"]
+    hk:
+      sessions:
+        - ["09:30", "12:00"]
+        - ["13:00", "16:00"]
+    us:
+      sessions:
+        - ["21:30", "23:59"]
+        - ["00:00", "04:00"]
+
+notifications:
+  # daily_summary: 每个交易日更新后发送一次当日建议（买入/卖出/观望均推送，默认）
+  # buy_sell: 与 daily_summary 相同（兼容旧配置）
+  # signal_change: 仅当 buy/hold/sell 变化时发送
+  trigger: daily_summary
+  email_enabled: true
+  wechat_enabled: true
+  batch_per_stock: true
+  include_backtest_summary: true
+
+walk_forward:
+  # overlapping + calendar: 日K 按自然日切窗，测试窗重叠（step < test）
+  mode: overlapping
+  window_unit:
+    "1d": calendar
+    "1h": bars
+    "1m": bars
+  train_bars:
+    "1d": 365
+    "1h": 240
+    "1m": 480
+  test_bars:
+    "1d": 180
+    "1h": 80
+    "1m": 120
+  step_bars:
+    "1d": 90
+    "1h": 40
+    "1m": 60
+  step_bars_candidates:
+    "1d": [60, 90, 120]
+    "1h": [20, 40, 60]
+    "1m": [30, 60, 120]
+  min_folds: 3
+  min_oos_avg_trades: 3
+  objective: sharpe_ratio
+  max_grid_combinations: 200
+  use_calendar_fallback: false
+  retrain_interval:
+    "1d": "7d"
+    "1h": "3d"
+    "1m": "1d"
+
+backtest:
+  commission_rate: 0.0003
+  min_trades: 5
+  low_win_rate: 0.40
+  high_win_rate: 0.55
+  max_drawdown_warn: 0.30
+  adjust_amount_by_confidence: true
+
+database:
+  # 优先使用环境变量 DATABASE_URL；未设置则使用下方 SQLite 文件
+  # PostgreSQL 示例: postgresql+psycopg://quant_picker:密码@127.0.0.1:5432/quant_picker
+  url: ""
+  path: "data/quant_picker.db"
+  schema: quant_picker
+  app_user: quant_picker
+
+# K 线连续性：相邻两根间隔超过阈值则视为断档，只保留最近一段连续数据
+data_quality:
+  max_bar_gap_days:
+    "1d": 30
+    "1h": 14
+    "1m": 3

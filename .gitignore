@@ -1,0 +1,78 @@
+# --- 敏感配置（含密钥、密码、API Key）---
+.env
+.env.*
+!.env.example
+config/.env
+config/.env.local
+config/.env.*.local
+.streamlit/secrets.toml
+
+# --- 本地数据与数据库 ---
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+*.egg
+
+# --- 测试 / 类型检查 / 格式化缓存 ---
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+coverage.xml
+
+# --- 大文件 / 本地数据导出 ---
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.csv
+*.xlsx
+*.xls
+*.zip
+*.tar
+*.tar.gz
+*.gz
+*.7z
+
+# --- 日志与运行时 ---
+*.log
+logs/
+nohup.out
+/tmp/
+
+# --- IDE / 编辑器 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- 操作系统 ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# --- Jupyter ---
+.ipynb_checkpoints/
