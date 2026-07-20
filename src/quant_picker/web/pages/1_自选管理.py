@@ -36,9 +36,13 @@ if "expanded_id" not in st.session_state:
 
 
 @st.cache_resource
-def _repo() -> Repository:
+def _session_factory():
     init_db()
-    return Repository(get_session_factory()())
+    return get_session_factory()
+
+
+def _repo() -> Repository:
+    return Repository(_session_factory()())
 
 
 def _list_name(item: WatchlistItem) -> str:
@@ -499,6 +503,10 @@ if submitted and symbol_in:
     except SymbolNotFoundError as e:
         st.error(str(e))
     except Exception as e:
+        try:
+            repo.session.rollback()
+        except Exception:
+            pass
         st.error(f"加入失败: {e}")
 
 items = repo.list_watchlist()

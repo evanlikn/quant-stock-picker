@@ -109,7 +109,12 @@ class Trainer:
             item.wfo_status = "done"
         except Exception:
             item.wfo_status = "failed"
+            self.repo.session.rollback()
             raise
         finally:
-            self.repo.update_watchlist(item)
+            try:
+                self.repo.update_watchlist(item)
+            except Exception:
+                self.repo.session.rollback()
+                raise
         return item

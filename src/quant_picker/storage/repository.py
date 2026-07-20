@@ -111,12 +111,9 @@ class Repository:
         )
         return row
 
-    def save_bars(
+    def _bar_records_from_df(
         self, symbol: str, market: str, interval: str, df: pd.DataFrame
-    ) -> int:
-        if df.empty:
-            return 0
-
+    ) -> list[dict]:
         records = []
         for ts, row in df.iterrows():
             records.append(
@@ -132,9 +129,27 @@ class Repository:
                     "volume": float(row["volume"]),
                 }
             )
+        return records
+
+    def save_bars(
+        self, symbol: str, market: str, interval: str, df: pd.DataFrame
+    ) -> int:
+        if df.empty:
+            return 0
+
+        records = self._bar_records_from_df(symbol, market, interval, df)
         if not records:
             return 0
 
+        try:
+            total_inserted = self._insert_bar_batches(records)
+            self.session.commit()
+            return total_inserted
+        except Exception:
+            self.session.rollback()
+            raise
+
+    def _insert_bar_batches(self, records: list[dict]) -> int:
         dialect = self.session.get_bind().dialect.name
         if dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as dialect_insert
@@ -155,22 +170,33 @@ class Repository:
             result = self.session.execute(stmt)
             if result.rowcount and result.rowcount > 0:
                 total_inserted += int(result.rowcount)
-        self.session.commit()
         return total_inserted
 
     def replace_bars(
         self, symbol: str, market: str, interval: str, df: pd.DataFrame
     ) -> int:
         """Replace all stored bars with a cleaned continuous segment."""
-        self.session.execute(
-            delete(Bar).where(
-                Bar.symbol == symbol,
-                Bar.market == market,
-                Bar.interval == interval,
+        if df.empty:
+            return 0
+
+        records = self._bar_records_from_df(symbol, market, interval, df)
+        if not records:
+            return 0
+
+        try:
+            self.session.execute(
+                delete(Bar).where(
+                    Bar.symbol == symbol,
+                    Bar.market == market,
+                    Bar.interval == interval,
+                )
             )
-        )
-        self.session.commit()
-        return self.save_bars(symbol, market, interval, df)
+            total_inserted = self._insert_bar_batches(records)
+            self.session.commit()
+            return total_inserted
+        except Exception:
+            self.session.rollback()
+            raise
 
     def load_bars(
         self, symbol: str, market: str, interval: str

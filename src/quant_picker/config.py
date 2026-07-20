@@ -56,15 +56,15 @@ def save_notification_flags(*, email_enabled: bool, wpush_enabled: bool) -> None
     path = project_root() / "config" / "settings.yaml"
     content = path.read_text(encoding="utf-8")
     content = re.sub(
-        r"^email_enabled:\s*\S+",
-        f"email_enabled: {str(email_enabled).lower()}",
+        r"^(\s*)email_enabled:\s*\S+",
+        rf"\1email_enabled: {str(email_enabled).lower()}",
         content,
         count=1,
         flags=re.MULTILINE,
     )
     content = re.sub(
-        r"^wechat_enabled:\s*\S+",
-        f"wechat_enabled: {str(wpush_enabled).lower()}",
+        r"^(\s*)wechat_enabled:\s*\S+",
+        rf"\1wechat_enabled: {str(wpush_enabled).lower()}",
         content,
         count=1,
         flags=re.MULTILINE,
