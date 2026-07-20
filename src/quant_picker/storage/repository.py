@@ -18,6 +18,9 @@ from quant_picker.storage.models import (
     WatchlistItem,
 )
 
+# SQLite SQLITE_MAX_VARIABLE_NUMBER defaults to 999; Bar rows use 9 columns each.
+_BAR_INSERT_BATCH = 100
+
 
 class Repository:
     def __init__(self, session: Session):
@@ -138,16 +141,22 @@ class Repository:
         else:
             from sqlalchemy.dialects.sqlite import insert as dialect_insert
 
-        stmt = dialect_insert(Bar).values(records)
-        if dialect == "postgresql":
-            stmt = stmt.on_conflict_do_nothing(constraint="uq_bar")
-        else:
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=["symbol", "market", "interval", "bar_time"]
-            )
-        result = self.session.execute(stmt)
+        batch_size = _BAR_INSERT_BATCH if dialect == "sqlite" else len(records)
+        total_inserted = 0
+        for i in range(0, len(records), batch_size):
+            chunk = records[i : i + batch_size]
+            stmt = dialect_insert(Bar).values(chunk)
+            if dialect == "postgresql":
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_bar")
+            else:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["symbol", "market", "interval", "bar_time"]
+                )
+            result = self.session.execute(stmt)
+            if result.rowcount and result.rowcount > 0:
+                total_inserted += int(result.rowcount)
         self.session.commit()
-        return int(result.rowcount) if result.rowcount and result.rowcount > 0 else 0
+        return total_inserted
 
     def replace_bars(
         self, symbol: str, market: str, interval: str, df: pd.DataFrame

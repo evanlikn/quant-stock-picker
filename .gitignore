@@ -8,7 +8,7 @@ config/.env.*.local
 .streamlit/secrets.toml
 
 # --- 本地数据与数据库 ---
-data/
+/data/
 *.db
 *.sqlite
 *.sqlite3
