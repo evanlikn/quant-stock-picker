@@ -20,6 +20,7 @@ from quant_picker.data.bars_util import bars_calendar_span_days, bars_cover_hist
 from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy
+from quant_picker.portfolio.position_sizer import get_position_sizing_config
 from quant_picker.web.charts import backtest_dashboard_figure, equity_curve_chart
 
 st.set_page_config(page_title="回测报告", page_icon="📊", layout="wide")
@@ -169,6 +170,13 @@ with tab_oos:
 
 with tab_full:
     st.markdown("**全样本回测** — 使用 WFO 优化参数在历史 K 线上回测（含图表信号标注）")
+    _ps = get_position_sizing_config()
+    if _ps.get("mode") == "atr_risk":
+        st.caption(
+            f"仓位：ATR 定仓（风险 {_ps['risk_pct'] * 100:.1f}% / 笔，"
+            f"{_ps['stop_atr_mult']:.0f}×ATR({_ps['atr_period']}) 止损）；"
+            "信号卖出或触及止损时在下一根开盘价平仓。"
+        )
     st.caption("全样本结果含未参与 OOS 验证的历史区间，收益通常高于 OOS 汇总，仅供参考。")
     full_rows = [
         {"指标": "总收益", "全样本": f"{full_report.total_return * 100:+.2f}%"},

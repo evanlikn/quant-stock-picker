@@ -9,6 +9,13 @@ lot_size:
   us: 1
   hk: 100
 
+# 仓位：atr_risk = 总资金固定风险比例 + ATR 止损距离定仓；fixed_pct = 按 max_single_position_pct 比例
+position_sizing:
+  mode: atr_risk
+  atr_period: 14
+  risk_pct: 0.01
+  stop_atr_mult: 2.0
+
 scheduler:
   timezone: "Asia/Shanghai"
   # 各市场日 K 收盘后独立更新与推送（北京时间）

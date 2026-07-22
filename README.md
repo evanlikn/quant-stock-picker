@@ -21,7 +21,7 @@ pip install -e .
 
 ## 配置
 
-1. 编辑 [`config/settings.yaml`](config/settings.yaml) — 资金、WFO、调度
+1. 编辑 [`config/settings.yaml`](config/settings.yaml) — 资金、WFO、调度、**ATR 仓位**（`position_sizing`）
 2. 编辑 [`config/strategies.yaml`](config/strategies.yaml) — 策略搜索空间
 3. 复制 `config/.env.example` → `config/.env`，填写 SMTP / WPUSH / TickFlow（可选）
 4. （推荐）配置 PostgreSQL，见下方「数据库」
@@ -29,6 +29,20 @@ pip install -e .
 ```bash
 cp config/.env.example config/.env
 ```
+
+### ATR 动态仓位（默认）
+
+`position_sizing` 控制实盘建议与回测仓位（默认 `atr_risk`）：
+
+| 参数 | 默认 | 含义 |
+|------|------|------|
+| `risk_pct` | `0.01` | 每笔最多亏损总资金的 1% |
+| `stop_atr_mult` | `2.0` | 止损距离 = 2×ATR |
+| `atr_period` | `14` | ATR 计算周期 |
+
+股数 ≈ `(total_capital × risk_pct) / (stop_atr_mult × ATR)`，再按 `lot_size` 取整，且不超过 `max_single_position_pct`。回测中触及止损或策略卖出信号时在下一根开盘价平仓。改回固定比例模式可设 `mode: fixed_pct`。
+
+每日建议会读取各策略**持仓记录**（买入建议自动写入，可在自选详情手动修正）。当收盘价 ≤ 入场价 − `stop_atr_mult×ATR` 时，建议变为**卖出**，理由含「ATR止损」。
 
 ## 数据库
 

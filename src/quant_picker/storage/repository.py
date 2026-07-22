@@ -15,6 +15,7 @@ from quant_picker.storage.models import (
     Bar,
     NotificationLog,
     Recommendation,
+    StrategyPosition,
     WatchlistItem,
 )
 
@@ -78,6 +79,9 @@ class Repository:
     def delete_watchlist(self, item_id: int) -> None:
         item = self.session.get(WatchlistItem, item_id)
         if item:
+            self.session.execute(
+                delete(StrategyPosition).where(StrategyPosition.watchlist_id == item_id)
+            )
             self.session.delete(item)
             self.session.commit()
 
@@ -416,6 +420,137 @@ class Repository:
         if watchlist_id:
             q = q.where(Recommendation.watchlist_id == watchlist_id)
         return list(self.session.scalars(q))
+
+    def last_buy_recommendation(
+        self, watchlist_id: int, strategy_name: str
+    ) -> Recommendation | None:
+        return self.session.scalar(
+            select(Recommendation)
+            .where(
+                Recommendation.watchlist_id == watchlist_id,
+                Recommendation.strategy_name == strategy_name,
+                Recommendation.action == "buy",
+                Recommendation.shares > 0,
+            )
+            .order_by(Recommendation.bar_time.desc(), Recommendation.created_at.desc())
+            .limit(1)
+        )
+
+    # --- Strategy positions (ATR stop) ---
+    def get_strategy_position(
+        self, watchlist_id: int, strategy_name: str
+    ) -> StrategyPosition | None:
+        return self.session.scalar(
+            select(StrategyPosition).where(
+                StrategyPosition.watchlist_id == watchlist_id,
+                StrategyPosition.strategy_name == strategy_name,
+            )
+        )
+
+    def list_strategy_positions(self, watchlist_id: int) -> list[StrategyPosition]:
+        return list(
+            self.session.scalars(
+                select(StrategyPosition)
+                .where(StrategyPosition.watchlist_id == watchlist_id)
+                .order_by(StrategyPosition.strategy_name)
+            )
+        )
+
+    def upsert_strategy_position(
+        self,
+        watchlist_id: int,
+        strategy_name: str,
+        *,
+        entry_price: float,
+        entry_shares: int,
+        entry_atr: float | None,
+        entry_bar_time: datetime | None,
+        manual_override: bool,
+        trailing_stop: float | None = None,
+    ) -> StrategyPosition:
+        row = self.get_strategy_position(watchlist_id, strategy_name)
+        if row is None:
+            row = StrategyPosition(
+                watchlist_id=watchlist_id,
+                strategy_name=strategy_name,
+            )
+            self.session.add(row)
+        row.entry_price = float(entry_price)
+        row.entry_shares = int(entry_shares)
+        row.entry_atr = entry_atr
+        row.entry_bar_time = entry_bar_time
+        row.manual_override = manual_override
+        if trailing_stop is not None:
+            row.trailing_stop = trailing_stop
+        row.updated_at = datetime.utcnow()
+        self.session.commit()
+        self.session.refresh(row)
+        return row
+
+    def update_position_trailing_stop(
+        self,
+        watchlist_id: int,
+        strategy_name: str,
+        trailing_stop: float,
+    ) -> None:
+        item = self.get_watchlist_by_id(watchlist_id)
+        if item and item.position_manual_override and item.position_entry_shares > 0:
+            item.position_trailing_stop = float(trailing_stop)
+            self.session.commit()
+            return
+        row = self.get_strategy_position(watchlist_id, strategy_name)
+        if row and row.entry_shares > 0:
+            row.trailing_stop = float(trailing_stop)
+            row.updated_at = datetime.utcnow()
+            self.session.commit()
+
+    def clear_strategy_position(self, watchlist_id: int, strategy_name: str) -> None:
+        row = self.get_strategy_position(watchlist_id, strategy_name)
+        if row:
+            self.session.delete(row)
+            self.session.commit()
+
+    def clear_all_strategy_positions(self, watchlist_id: int) -> None:
+        self.session.execute(
+            delete(StrategyPosition).where(StrategyPosition.watchlist_id == watchlist_id)
+        )
+        self.session.commit()
+
+    def set_watchlist_manual_position(
+        self,
+        watchlist_id: int,
+        *,
+        entry_price: float,
+        entry_shares: int,
+        entry_atr: float | None,
+        entry_bar_time: datetime | None,
+        trailing_stop: float | None = None,
+    ) -> WatchlistItem | None:
+        item = self.get_watchlist_by_id(watchlist_id)
+        if item is None:
+            return None
+        item.position_manual_override = True
+        item.position_entry_price = float(entry_price)
+        item.position_entry_shares = int(entry_shares)
+        item.position_entry_atr = entry_atr
+        item.position_entry_bar_time = entry_bar_time
+        item.position_trailing_stop = trailing_stop
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def clear_watchlist_manual_position(self, watchlist_id: int) -> None:
+        item = self.get_watchlist_by_id(watchlist_id)
+        if item is None:
+            return
+        item.position_manual_override = False
+        item.position_entry_price = 0.0
+        item.position_entry_shares = 0
+        item.position_entry_atr = None
+        item.position_entry_bar_time = None
+        item.position_trailing_stop = None
+        self.session.commit()
+        self.clear_all_strategy_positions(watchlist_id)
 
     # --- Notifications ---
     def log_notification(

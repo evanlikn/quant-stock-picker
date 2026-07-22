@@ -9,18 +9,27 @@ if _ROOT not in sys.path:
     sys.path.insert(0, os.path.join(_ROOT, "src"))
 os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 
+import pandas as pd
 import streamlit as st
 
 from quant_picker.backtest.oos_quality import oos_sample_warning
 from quant_picker.data.symbol_validate import SymbolNotFoundError, validate_symbol
 from quant_picker.engine.analyzer import Analyzer
+from quant_picker.engine.position_tracker import (
+    atr_at_bar,
+    effective_stop_price,
+    resolve_position,
+    watchlist_manual_snapshot,
+)
 from quant_picker.engine.updater import Updater
 from quant_picker.market.detector import detect_market, normalize_symbol
 from quant_picker.optimization.trainer import Trainer
+from quant_picker.portfolio.position_sizer import atr_stop_price, get_position_sizing_config
 from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.models import WatchlistItem
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy
+from quant_picker.strategies.indicators import atr as calc_atr
 from quant_picker.web.charts import price_chart_with_signals
 
 st.set_page_config(page_title="自选管理", page_icon="⭐", layout="wide")
@@ -151,6 +160,121 @@ else:
             _config_form(item_id)
 
 
+def _position_defaults(item: WatchlistItem, repo: Repository) -> tuple[float, int]:
+    manual = watchlist_manual_snapshot(item)
+    if manual is not None:
+        return manual.entry_price, manual.entry_shares
+
+    for pos in repo.list_strategy_positions(item.id):
+        if pos.entry_shares > 0 and pos.entry_price > 0:
+            return float(pos.entry_price), int(pos.entry_shares)
+    return 0.0, 0
+
+
+def _position_form(item_id: int) -> None:
+    repo = _repo()
+    item = repo.get_watchlist_by_id(item_id)
+    if item is None:
+        return
+
+    cfg = get_position_sizing_config()
+    lot_step = 100 if item.market.lower() in ("cn", "hk") else 1
+    manual = watchlist_manual_snapshot(item)
+
+    st.caption(
+        f"{item.symbol} · {_resolve_name(item)} · "
+        f"{_INTERVAL_LABEL.get(item.interval, item.interval)}"
+    )
+    st.caption(
+        "保存后，该股票所有策略共用此持仓；买入价和股数都设为 0 表示已清仓，"
+        "将恢复为各策略独立记录建议持仓。"
+        f" 移动止损 = max(历史止损, 收盘 − {cfg['stop_atr_mult']:.0f}×最新ATR)，只升不降。"
+    )
+
+    default_price, default_shares = _position_defaults(item, repo)
+    if manual:
+        stop = effective_stop_price(manual)
+        stop_note = f"，移动止损 {stop:.2f}" if stop else ""
+        st.caption(
+            f"当前手动持仓：{manual.entry_price:.2f} × {manual.entry_shares} 股{stop_note}"
+        )
+
+    price_in = st.number_input(
+        "买入价",
+        min_value=0.0,
+        value=float(default_price),
+        format="%.4f",
+        key=f"pos_price_{item.id}",
+    )
+    shares_in = st.number_input(
+        "买入股数",
+        min_value=0,
+        value=int(default_shares),
+        step=lot_step,
+        key=f"pos_shares_{item.id}",
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("保存", type="primary", key=f"pos_save_{item.id}"):
+            if price_in <= 0 and shares_in <= 0:
+                repo.clear_watchlist_manual_position(item.id)
+                st.session_state.pop(f"detail_result_{item.id}", None)
+                st.success("已标记清仓，各策略恢复独立记录")
+                st.rerun()
+            elif price_in <= 0 or shares_in <= 0:
+                st.error("买入价和股数须同时大于 0，或都设为 0 表示清仓")
+            else:
+                df = repo.load_bars(item.symbol, item.market, item.interval)
+                bar_time = (
+                    pd.Timestamp(df.index.max()).to_pydatetime()
+                    if not df.empty
+                    else item.position_entry_bar_time
+                )
+                entry_atr = item.position_entry_atr
+                if entry_atr is None and not df.empty and bar_time:
+                    entry_atr = atr_at_bar(df, bar_time, cfg["atr_period"])
+                initial_stop = (
+                    atr_stop_price(price_in, entry_atr)
+                    if entry_atr and entry_atr > 0
+                    else None
+                )
+                repo.set_watchlist_manual_position(
+                    item.id,
+                    entry_price=price_in,
+                    entry_shares=int(shares_in),
+                    entry_atr=entry_atr,
+                    entry_bar_time=bar_time,
+                    trailing_stop=initial_stop,
+                )
+                st.session_state.pop(f"detail_result_{item.id}", None)
+                st.success("已保存，所有策略已同步为该持仓")
+                st.rerun()
+    with c2:
+        if st.button("取消", key=f"pos_cancel_{item.id}"):
+            st.rerun()
+    with c3:
+        if st.button("恢复默认值", key=f"pos_auto_{item.id}"):
+            repo.clear_watchlist_manual_position(item.id)
+            st.session_state.pop(f"detail_result_{item.id}", None)
+            st.success("已恢复各策略独立记录")
+            st.rerun()
+
+
+if hasattr(st, "dialog"):
+
+    @st.dialog("编辑持仓", on_dismiss="rerun")
+    def _open_position_dialog(item_id: int) -> None:
+        _position_form(item_id)
+
+else:
+
+    def _open_position_dialog(item_id: int) -> None:
+        with st.container(border=True):
+            st.subheader("编辑持仓")
+            _position_form(item_id)
+
+
 def _render_detail(item: WatchlistItem) -> None:
     cache_key = f"detail_result_{item.id}"
     if cache_key not in st.session_state:
@@ -170,9 +294,41 @@ def _render_detail(item: WatchlistItem) -> None:
         if warn:
             st.warning(f"{adv.strategy_name}: {warn}")
 
+    manual = watchlist_manual_snapshot(item)
+    if manual:
+        stop = effective_stop_price(manual)
+        stop_note = f"，移动止损 {stop:.2f}" if stop else ""
+        st.info(
+            f"手动持仓（全策略共用）：{manual.entry_price:.2f} × {manual.entry_shares} 股"
+            f"{stop_note} · 可在操作列「编辑持仓」修改"
+        )
+
     rows = []
+    repo = _repo()
+    atr_txt = "—"
+    atr_period = get_position_sizing_config()["atr_period"]
+    if len(result.df) >= atr_period + 1:
+        atr_series = calc_atr(
+            result.df["high"], result.df["low"], result.df["close"], atr_period
+        )
+        val = atr_series.iloc[-1]
+        if val is not None and not pd.isna(val):
+            atr_txt = f"{float(val):.4f}"
+
     for adv in result.advices:
         oos = adv.oos_backtest
+        pos = resolve_position(repo, item.id, adv.strategy_name)
+        stop_txt = "—"
+        stop_val = effective_stop_price(pos)
+        if stop_val is not None:
+            stop_txt = f"{stop_val:.2f}"
+        hold_txt = "—"
+        if pos and pos.entry_shares > 0:
+            hold_txt = f"{pos.entry_price:.2f} × {pos.entry_shares}"
+            if pos.manual_override:
+                hold_txt += " 手动"
+            elif not manual:
+                hold_txt += " 自动"
         rows.append(
             {
                 "策略": adv.strategy_name,
@@ -181,8 +337,10 @@ def _render_detail(item: WatchlistItem) -> None:
                 "OOS胜率": f"{oos.win_rate*100:.0f}%" if oos else "-",
                 "OOS收益": f"{oos.total_return*100:+.1f}%" if oos else "-",
                 "OOS回撤": f"{oos.max_drawdown*100:.1f}%" if oos else "-",
-                "folds": oos.fold_count if oos else 0,
                 "可信度": adv.confidence,
+                "ATR": atr_txt,
+                "持仓": hold_txt,
+                "止损价": stop_txt,
                 "金额": f"¥{adv.amount:,.0f}"
                 + (" (不足一手)" if adv.amount > 0 and adv.shares == 0 else ""),
                 "股数": adv.shares if adv.shares > 0 else ("-" if adv.amount > 0 else 0),
@@ -292,13 +450,16 @@ def _render_watchlist_rows(items: list[WatchlistItem]) -> None:
             with cols[2]:
                 _render_row_text_grid(it)
             with cols[3]:
-                b1, b2, b3 = st.columns(3)
+                b1, b2, b3, b4 = st.columns(4)
                 with b1:
                     if st.button("配置", key=f"cfg_{it.id}", use_container_width=True):
                         _open_config_dialog(it.id)
                 with b2:
+                    if st.button("编辑持仓", key=f"pos_{it.id}", use_container_width=True):
+                        _open_position_dialog(it.id)
+                with b3:
                     if st.button(
-                        "同步行情并刷新",
+                        "同步行情",
                         key=f"sync_{it.id}",
                         use_container_width=True,
                     ):
@@ -311,9 +472,9 @@ def _render_watchlist_rows(items: list[WatchlistItem]) -> None:
                             if st.session_state.expanded_id == it.id:
                                 st.session_state[f"loaded_{it.id}"] = True
                         st.rerun()
-                with b3:
+                with b4:
                     if st.button(
-                        "立即重新训练",
+                        "重新训练",
                         key=f"train_{it.id}",
                         use_container_width=True,
                     ):

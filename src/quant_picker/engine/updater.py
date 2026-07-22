@@ -6,8 +6,11 @@ from datetime import datetime
 import pandas as pd
 
 from quant_picker.engine.analyzer import Analyzer
+from quant_picker.engine.position_tracker import PositionTracker
 from quant_picker.notifications.dispatcher import NotificationDispatcher
 from quant_picker.optimization.trainer import Trainer, should_retrain
+from quant_picker.portfolio.position_sizer import get_position_sizing_config
+from quant_picker.strategies.indicators import atr as calc_atr
 from quant_picker.storage.models import WatchlistItem
 from quant_picker.storage.repository import Repository
 
@@ -38,6 +41,23 @@ class Updater:
             return item
 
         new_recs = []
+        tracker = PositionTracker(self.repo)
+        close_price = (
+            float(result.df["close"].iloc[-1])
+            if result.df is not None and not result.df.empty
+            else None
+        )
+        atr_last = None
+        if result.df is not None and not result.df.empty:
+            period = get_position_sizing_config()["atr_period"]
+            if len(result.df) >= period + 1:
+                atr_series = calc_atr(
+                    result.df["high"], result.df["low"], result.df["close"], period
+                )
+                val = atr_series.iloc[-1]
+                if val is not None and not pd.isna(val):
+                    atr_last = float(val)
+
         for adv in result.advices:
             oos_snap = adv.oos_backtest.to_dict() if adv.oos_backtest else {}
             rec = self.repo.save_recommendation(
@@ -54,6 +74,15 @@ class Updater:
             )
             if rec:
                 new_recs.append(rec)
+            tracker.sync_after_signal(
+                item.id,
+                adv.strategy_name,
+                adv.signal,
+                entry_price=close_price,
+                entry_shares=adv.shares,
+                entry_atr=atr_last,
+                bar_time=result.bar_time,
+            )
 
         item.last_run_at = datetime.utcnow()
         self.repo.update_watchlist(item)

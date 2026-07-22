@@ -12,9 +12,16 @@ from quant_picker.config import load_settings, load_strategies_config
 from quant_picker.data.bar_sync import BarSyncService
 from quant_picker.data.registry import get_provider
 from quant_picker.market.detector import Market, detect_market, normalize_symbol
-from quant_picker.portfolio.position_sizer import PositionSizer
+from quant_picker.engine.position_tracker import (
+    apply_atr_stop_signal,
+    persist_trailing_stop,
+    resolve_position,
+    sell_amount_from_position,
+)
+from quant_picker.portfolio.position_sizer import PositionSizer, get_position_sizing_config
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy, list_enabled_strategies
+from quant_picker.strategies.indicators import atr as calc_atr
 
 
 @dataclass
@@ -86,11 +93,19 @@ class Analyzer:
             provider = get_provider(m)
             df = provider.fetch_bars(sym, interval)
         advices = []
+        atr_period = get_position_sizing_config()["atr_period"]
+        atr_last = None
+        if not df.empty and len(df) >= atr_period + 1:
+            atr_series = calc_atr(df["high"], df["low"], df["close"], atr_period)
+            val = atr_series.iloc[-1]
+            if val is not None and not pd.isna(val):
+                atr_last = float(val)
+
         for strat in list_enabled_strategies(interval):
             sig = strat.analyze(df)
             price = float(df["close"].iloc[-1]) if not df.empty else None
             conf = "medium"
-            pos = self.sizer.compute(sig, m, conf, price)
+            pos = self.sizer.compute(sig, m, conf, price, atr=atr_last)
             advices.append(
                 StrategyAdvice(
                     strategy_name=strat.name,
@@ -125,6 +140,14 @@ class Analyzer:
 
         m = Market(item.market)
         advices = []
+        atr_period = get_position_sizing_config()["atr_period"]
+        atr_last = None
+        if not df.empty and len(df) >= atr_period + 1:
+            atr_series = calc_atr(df["high"], df["low"], df["close"], atr_period)
+            val = atr_series.iloc[-1]
+            if val is not None and not pd.isna(val):
+                atr_last = float(val)
+
         for sc in load_strategies_config().get("strategies", []):
             if not sc.get("enabled", True):
                 continue
@@ -144,15 +167,33 @@ class Analyzer:
                 optimized = False
             strat = build_strategy(name, item.interval, params)
             sig = strat.analyze(df)
+            close = float(df["close"].iloc[-1]) if not df.empty else None
+            position = resolve_position(self.repo, item.id, name)
+            if close is not None and position is not None and atr_last is not None:
+                position = persist_trailing_stop(
+                    self.repo, item.id, name, position, close, atr_last
+                )
+            if close is not None:
+                sig = apply_atr_stop_signal(sig, position, close)
+
             conf = _confidence_from_oos(oos)
-            price = float(df["close"].iloc[-1]) if not df.empty else None
-            pos = self.sizer.compute(sig, m, conf, price)
+            if sig.action == "sell":
+                amount, shares = sell_amount_from_position(position, close)
+                if shares <= 0:
+                    pos = self.sizer.compute(sig, m, conf, close, atr=atr_last)
+                    amount, shares = pos.amount, pos.shares
+            elif sig.action == "buy":
+                pos = self.sizer.compute(sig, m, conf, close, atr=atr_last)
+                amount, shares = pos.amount, pos.shares
+            else:
+                amount, shares = 0.0, 0
+
             advices.append(
                 StrategyAdvice(
                     strategy_name=name,
                     signal=sig,
-                    amount=pos.amount,
-                    shares=pos.shares,
+                    amount=amount,
+                    shares=shares,
                     params=params,
                     params_display=strat.format_params(),
                     oos_backtest=oos,
