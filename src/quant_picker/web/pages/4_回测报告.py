@@ -16,7 +16,7 @@ from quant_picker.backtest.oos_quality import oos_sample_warning
 from quant_picker.backtest.report import BacktestReport
 from quant_picker.config import load_strategies_config
 from quant_picker.data.bar_sync import BarSyncService
-from quant_picker.data.bars_util import bars_calendar_span_days, bars_cover_history, initial_history_days
+from quant_picker.data.bars_util import bars_calendar_span_days, bars_cover_history, effective_history_days
 from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy
@@ -58,7 +58,7 @@ with sync_col:
         with st.spinner("拉取历史 K 线..."):
             sync = BarSyncService(repo)
             df, inserted = sync.sync(
-                item.symbol, item.market, item.interval, force_full=True
+                item.symbol, item.market, item.interval, force_full=True, item=item
             )
         st.success(f"已同步，新增 {inserted} 根")
         st.rerun()
@@ -68,19 +68,19 @@ if df.empty:
     st.stop()
 
 span_days = bars_calendar_span_days(df)
-required_days = initial_history_days(item.interval)
+required_days = effective_history_days(item)
 with info_col:
     st.caption(
         f"本地 K 线：**{len(df)}** 根（连续段）· "
         f"{df.index.min().strftime('%Y-%m-%d')} ~ {df.index.max().strftime('%Y-%m-%d')} "
-        f"（跨度 {span_days} 天，配置目标 {required_days} 天）"
+        f"（跨度 {span_days} 天，自选窗口 {required_days} 天）"
     )
 if raw_bar_count > len(df):
     st.info(
         f"检测到历史断档或脏数据，已丢弃较早的 **{raw_bar_count - len(df)}** 根 K 线，"
         f"仅使用最近连续段（自 {df.index.min().strftime('%Y-%m-%d')} 起）。"
     )
-if not bars_cover_history(df, item.interval):
+if not bars_cover_history(df, item.interval, history_days=required_days):
     st.warning(
         f"连续 K 线仅覆盖 {span_days} 天（未满 {required_days} 天），"
         "可能为新上市或历史数据源不完整；回测与 WFO 将基于现有连续段进行。"

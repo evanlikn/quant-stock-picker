@@ -35,6 +35,7 @@ class Repository:
         interval: str,
         notify_enabled: bool = False,
         display_name: str | None = None,
+        history_days: int | None = None,
     ) -> WatchlistItem:
         existing = self.get_watchlist(symbol, market, interval)
         if existing:
@@ -48,6 +49,7 @@ class Repository:
             interval=interval,
             notify_enabled=notify_enabled,
             display_name=display_name,
+            history_days=int(history_days) if history_days and history_days > 0 else None,
             wfo_status="pending",
         )
         self.session.add(item)

@@ -44,6 +44,7 @@ class WatchlistItem(Base):
     last_bar_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    history_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Stock-level manual position (shared by all strategies when enabled).
     position_manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
     position_entry_price: Mapped[float] = mapped_column(Float, default=0.0)
@@ -220,6 +221,8 @@ def _migrate_schema(engine) -> None:
         additions.append(("position_entry_bar_time", ts_type))
     if "position_trailing_stop" not in cols:
         additions.append(("position_trailing_stop", "FLOAT"))
+    if "history_days" not in cols:
+        additions.append(("history_days", "INTEGER"))
 
     for col, ddl in additions:
         with engine.begin() as conn:

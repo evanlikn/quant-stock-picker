@@ -134,7 +134,7 @@ class Analyzer:
         assert self.repo is not None
         if sync_remote:
             sync = BarSyncService(self.repo)
-            df, _ = sync.sync(item.symbol, item.market, item.interval)
+            df, _ = sync.sync(item.symbol, item.market, item.interval, item=item)
         else:
             df = self.repo.load_bars(item.symbol, item.market, item.interval)
 

@@ -28,6 +28,20 @@ def initial_history_days(interval: Interval) -> int:
     return max(int(str(window).rstrip("d")), 1)
 
 
+def effective_history_days(item) -> int:
+    """Per-watchlist history window, falling back to global scheduler defaults."""
+    days = getattr(item, "history_days", None)
+    if days is not None and int(days) > 0:
+        return int(days)
+    return initial_history_days(getattr(item, "interval", "1d"))
+
+
+def history_fetch_start(history_days: int) -> datetime:
+    """Calendar start for remote fetch (extra buffer for non-trading days)."""
+    days = max(int(history_days), 1)
+    return datetime.utcnow() - timedelta(days=days + 14)
+
+
 def max_bar_gap_days(interval: Interval) -> int:
     """Max calendar days between adjacent bars before treating as a data break."""
     dq = load_settings().get("data_quality", {}) or {}
@@ -41,11 +55,17 @@ def bars_calendar_span_days(df: pd.DataFrame) -> int:
     return max((df.index.max() - df.index.min()).days, 0)
 
 
-def bars_cover_history(df: pd.DataFrame, interval: Interval, *, slack_days: int = 14) -> bool:
+def bars_cover_history(
+    df: pd.DataFrame,
+    interval: Interval,
+    *,
+    slack_days: int = 14,
+    history_days: int | None = None,
+) -> bool:
     """True when continuous bars span at least the configured initial_history window."""
     if df.empty:
         return False
-    required = initial_history_days(interval)
+    required = history_days if history_days is not None else initial_history_days(interval)
     return bars_calendar_span_days(df) + slack_days >= required
 
 
@@ -102,6 +122,8 @@ def trim_bars(
     interval: Interval,
     start: datetime | None,
     end: datetime | None,
+    *,
+    history_days: int | None = None,
 ) -> pd.DataFrame:
     if start is not None:
         bars = bars[bars.index >= pd.Timestamp(start)]
@@ -109,10 +131,17 @@ def trim_bars(
         bars = bars[bars.index <= pd.Timestamp(end)]
 
     if start is None and not bars.empty:
-        days = initial_history_days(interval)
-        cutoff = bars.index.max() - timedelta(days=days)
+        days = history_days if history_days is not None else initial_history_days(interval)
+        cutoff = bars.index.max() - timedelta(days=max(int(days), 1))
         bars = bars[bars.index >= cutoff]
     return bars
+
+
+def trim_to_history_days(df: pd.DataFrame, history_days: int) -> pd.DataFrame:
+    if df.empty or history_days <= 0:
+        return df
+    cutoff = df.index.max() - timedelta(days=int(history_days))
+    return df[df.index >= cutoff]
 
 
 def prepare_ohlcv(
@@ -121,6 +150,7 @@ def prepare_ohlcv(
     *,
     trim_history: bool = False,
     ensure_continuous: bool = True,
+    history_days: int | None = None,
 ) -> tuple[pd.DataFrame, ContinuityInfo]:
     """
     Standard OHLCV cleanup pipeline: sort/dedupe -> optional history window -> continuity trim.
@@ -130,7 +160,7 @@ def prepare_ohlcv(
 
     out = _normalize_ohlcv_index(df)
     if trim_history:
-        out = trim_bars(out, interval, start=None, end=None)
+        out = trim_bars(out, interval, start=None, end=None, history_days=history_days)
 
     if ensure_continuous:
         out, info = trim_latest_continuous(out, interval)

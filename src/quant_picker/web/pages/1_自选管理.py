@@ -25,6 +25,7 @@ from quant_picker.engine.updater import Updater
 from quant_picker.market.detector import detect_market, normalize_symbol
 from quant_picker.optimization.trainer import Trainer
 from quant_picker.portfolio.position_sizer import atr_stop_price, get_position_sizing_config
+from quant_picker.data.bars_util import initial_history_days
 from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.models import WatchlistItem
 from quant_picker.storage.repository import Repository
@@ -506,9 +507,15 @@ st.markdown(
     form[data-testid="stForm"] [data-testid="stHorizontalBlock"] {
         align-items: flex-end !important;
     }
-    div[data-testid="stForm"] [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(3) [data-testid="stCheckbox"],
-    form[data-testid="stForm"] [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(3) [data-testid="stCheckbox"] {
-        margin-bottom: 0.25rem;
+    /* 加入自选表单：股票代码列略宽，控件用 Streamlit width 控制自身大小 */
+    div[data-testid="stVerticalBlock"]:has(#add-watch-form) form[data-testid="stForm"]
+    [data-testid="stHorizontalBlock"] {
+        align-items: flex-end !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(#add-watch-form) form[data-testid="stForm"]
+    [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(4)
+    [data-testid="stCheckbox"] {
+        margin-bottom: 0.35rem !important;
     }
     /* 自选列表：行间边框容器间距 */
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
@@ -620,13 +627,18 @@ st.markdown(
 
 repo = _repo()
 
+st.markdown('<div id="add-watch-form"></div>', unsafe_allow_html=True)
+
+# 股票代码列宽 +20%，其余四列等分
+_ADD_WATCH_COLS = [1.2, 1, 1, 1, 1]
+
 with st.form("add_watch"):
     try:
-        c1, c2, c3, c4 = st.columns([2, 3, 1, 1], vertical_alignment="bottom")
+        c1, c2, c3, c4, c5 = st.columns(_ADD_WATCH_COLS, vertical_alignment="bottom")
     except TypeError:
-        c1, c2, c3, c4 = st.columns([2, 3, 1, 1])
+        c1, c2, c3, c4, c5 = st.columns(_ADD_WATCH_COLS)
     with c1:
-        symbol_in = st.text_input("股票代码", value="600519")
+        symbol_in = st.text_input("股票代码", value="600519", width=173)
     with c2:
         interval_in = st.radio(
             "K线周期",
@@ -634,11 +646,25 @@ with st.form("add_watch"):
             format_func=lambda x: _INTERVAL_LABEL[x],
             horizontal=True,
             index=0,
+            width="content",
             help="选择加入自选后拉取与训练的 K 线频率",
         )
     with c3:
-        notify = st.checkbox("开启提醒")
+        history_days_in = st.number_input(
+            "历史窗口（天）",
+            min_value=1,
+            value=initial_history_days(interval_in),
+            step=1,
+            width=140,
+            key=f"add_history_days_{interval_in}",
+            help=(
+                "固定以自然日计：日K 拉取最近 N 根日K；"
+                "时K/分K 拉取最近 N 个自然日内的全部时K/分K"
+            ),
+        )
     with c4:
+        notify = st.checkbox("开启提醒")
+    with c5:
         submitted = st.form_submit_button("加入自选", type="primary")
 
 if submitted and symbol_in:
@@ -655,7 +681,12 @@ if submitted and symbol_in:
         else:
             with st.spinner(f"校验并训练 {sym}（{name}）· {interval_label}..."):
                 item = repo.add_watchlist(
-                    sym, m.value, interval_in, notify, display_name=name
+                    sym,
+                    m.value,
+                    interval_in,
+                    notify,
+                    display_name=name,
+                    history_days=int(history_days_in),
                 )
                 item = Trainer(repo).run_walk_forward(item, force=True)
                 if item.wfo_status == "done":

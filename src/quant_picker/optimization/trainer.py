@@ -45,6 +45,7 @@ class Trainer:
             item.interval,
             min_bars=self._min_bars_needed(item.interval),
             force_full=force_full,
+            item=item,
         )
         if not stored.empty:
             latest = pd.Timestamp(stored.index.max()).to_pydatetime()
