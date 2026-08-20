@@ -35,6 +35,16 @@ def load_strategies_config() -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+@lru_cache
+def load_screener_config() -> dict[str, Any]:
+    path = project_root() / "config" / "screener.yaml"
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data or {}
+
+
 def load_env() -> None:
     root = project_root()
     for candidate in (root / ".env", root / "config" / ".env"):
@@ -47,6 +57,7 @@ def load_env() -> None:
 def clear_settings_cache() -> None:
     load_settings.cache_clear()
     load_strategies_config.cache_clear()
+    load_screener_config.cache_clear()
 
 
 def save_notification_flags(*, email_enabled: bool, wpush_enabled: bool) -> None:

@@ -15,6 +15,8 @@ from quant_picker.storage.models import (
     Bar,
     NotificationLog,
     Recommendation,
+    ScreenerResult,
+    ScreenerRun,
     StrategyPosition,
     WatchlistItem,
 )
@@ -623,5 +625,80 @@ class Repository:
                 select(NotificationLog)
                 .order_by(NotificationLog.sent_at.desc())
                 .limit(limit)
+            )
+        )
+
+    # --- Screener ---
+    def create_screener_run(
+        self,
+        *,
+        market: str,
+        universe_id: str,
+        top_n: int,
+        factor_config_json: str,
+        universe_size: int,
+    ) -> ScreenerRun:
+        run = ScreenerRun(
+            market=market,
+            universe_id=universe_id,
+            top_n=top_n,
+            factor_config_json=factor_config_json,
+            universe_size=universe_size,
+            status="running",
+        )
+        self.session.add(run)
+        self.session.commit()
+        self.session.refresh(run)
+        return run
+
+    def finish_screener_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        screened_count: int,
+        warnings: list[str] | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        run = self.session.get(ScreenerRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        run.screened_count = screened_count
+        run.warnings_json = json.dumps(warnings or [], ensure_ascii=False)
+        run.error_message = error_message
+        run.finished_at = datetime.utcnow()
+        self.session.add(run)
+        self.session.commit()
+
+    def save_screener_results(self, run_id: int, ranked: list) -> None:
+        self.session.execute(delete(ScreenerResult).where(ScreenerResult.run_id == run_id))
+        for row in ranked:
+            self.session.add(
+                ScreenerResult(
+                    run_id=run_id,
+                    rank=int(row.rank),
+                    tf_symbol=row.tf_symbol,
+                    symbol=row.symbol,
+                    market=row.market,
+                    display_name=row.display_name,
+                    composite_score=row.composite_score,
+                    factor_scores_json=json.dumps(row.factor_scores, ensure_ascii=False),
+                )
+            )
+        self.session.commit()
+
+    def get_latest_screener_run(self, market: str | None = None) -> ScreenerRun | None:
+        q = select(ScreenerRun).where(ScreenerRun.status == "done")
+        if market:
+            q = q.where(ScreenerRun.market == market.lower())
+        return self.session.scalar(q.order_by(ScreenerRun.finished_at.desc()).limit(1))
+
+    def list_screener_results(self, run_id: int) -> list[ScreenerResult]:
+        return list(
+            self.session.scalars(
+                select(ScreenerResult)
+                .where(ScreenerResult.run_id == run_id)
+                .order_by(ScreenerResult.rank.asc())
             )
         )

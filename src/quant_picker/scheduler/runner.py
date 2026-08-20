@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from quant_picker.config import auto_sync_intervals, load_settings, market_daily_run_schedule
 from quant_picker.engine.updater import Updater
@@ -13,6 +13,8 @@ from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.repository import Repository
 
 SUPPORTED_MARKETS = ("cn", "hk", "us")
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_hhmm(value: str) -> tuple[int, int]:
@@ -59,7 +61,10 @@ def run_market_interval_updates(market: str, interval: str) -> None:
         try:
             updater.update_watchlist_item(item)
         except Exception:
-            continue
+            # 逐只跳过而不中断整轮，但必须留下痕迹，否则「某只没更新」无从排查
+            logger.exception(
+                "update failed: %s %s %s", item.symbol, item.market, item.interval
+            )
 
 
 def run_interval_updates(interval: str) -> None:
@@ -79,7 +84,9 @@ def run_interval_updates(interval: str) -> None:
         try:
             updater.update_watchlist_item(item)
         except Exception:
-            continue
+            logger.exception(
+                "update failed: %s %s %s", item.symbol, item.market, item.interval
+            )
 
 
 def run_daily_close_once(market: str | None = None) -> None:
@@ -110,8 +117,58 @@ def _register_market_daily_jobs(scheduler: BlockingScheduler, tz: str) -> list[s
     return labels
 
 
+def _register_intraday_job(scheduler: BlockingScheduler, tz: str, interval: str) -> str:
+    """Register an intraday job aligned to K-line boundaries.
+
+    用 cron 而不是 interval 触发：interval 是相对调度器启动时刻计时的，进程什么时候
+    起、任务就什么时候跑，和 K 线收线时间对不上。cron 固定落在整点/整分之后，拿到的
+    才是刚收完的那根 K 线。各市场是否在交易时段由 run_interval_updates 逐只判断。
+    """
+    if interval == "1h":
+        trigger = CronTrigger(minute=2, timezone=tz)
+        label = "1h@每小时 02 分"
+    else:
+        trigger = CronTrigger(second=20, timezone=tz)
+        label = "1m@每分钟 20 秒"
+    scheduler.add_job(
+        run_interval_updates,
+        trigger,
+        args=[interval],
+        id=f"update_{interval}",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    return label
+
+
+def _warn_uncovered_intervals(sync_intervals: set[str]) -> None:
+    """自选里存在但没有对应定时任务的周期，会永远不自动更新，启动时点出来。"""
+    session = get_session_factory()()
+    try:
+        repo = Repository(session)
+        uncovered: dict[str, list[str]] = {}
+        for item in repo.list_watchlist(enabled_only=True):
+            if item.interval not in sync_intervals:
+                uncovered.setdefault(item.interval, []).append(item.symbol)
+    finally:
+        session.close()
+
+    for interval, symbols in sorted(uncovered.items()):
+        preview = ", ".join(symbols[:5]) + (" ..." if len(symbols) > 5 else "")
+        print(
+            f"[warn] {len(symbols)} 只自选是 {interval} 周期，但 auto_sync_intervals "
+            f"未包含 {interval}，它们不会被自动更新：{preview}"
+        )
+
+
 def main() -> None:
     import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     if "--once" in sys.argv:
         init_db()
@@ -135,27 +192,19 @@ def main() -> None:
     market_labels: list[str] = []
     if "1d" in sync_intervals:
         market_labels = _register_market_daily_jobs(scheduler, tz)
-    if "1h" in sync_intervals:
-        scheduler.add_job(
-            run_interval_updates,
-            IntervalTrigger(hours=1),
-            args=["1h"],
-            id="update_1h",
-            replace_existing=True,
-        )
-    if "1m" in sync_intervals:
-        scheduler.add_job(
-            run_interval_updates,
-            IntervalTrigger(minutes=1),
-            args=["1m"],
-            id="update_1m",
-            replace_existing=True,
-        )
+    intraday_labels = [
+        _register_intraday_job(scheduler, tz, interval)
+        for interval in ("1h", "1m")
+        if interval in sync_intervals
+    ]
 
     parts = [f"intervals={sorted(sync_intervals)}"]
     if market_labels:
         parts.append("daily=" + ", ".join(market_labels))
+    if intraday_labels:
+        parts.append("intraday=" + ", ".join(intraday_labels))
     print(f"Quant picker scheduler started ({'; '.join(parts)})...")
+    _warn_uncovered_intervals(sync_intervals)
     scheduler.start()
 
 

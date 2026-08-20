@@ -1,0 +1,63 @@
+# 多因子选股配置
+default_market: cn
+top_n: 100
+kline_count: 120
+max_workers: 8
+instrument_batch_size: 500
+
+universes:
+  cn: CN_Equity_A
+  hk: HK_Equity
+  us: US_Equity
+
+filters:
+  exclude_st: true
+  exclude_bj: true
+  exclude_types:
+    - etf
+    - index
+    - fund
+
+# direction: high = 越大越好；low = 越小越好（会自动取反）
+# source: price = 日K计算；fundamental = TickFlow 财务（需 API 权限，无权限时跳过）
+factors:
+  - name: momentum_20d
+    label: 20日动量
+    weight: 0.22
+    direction: high
+    source: price
+  - name: momentum_60d
+    label: 60日动量
+    weight: 0.18
+    direction: high
+    source: price
+  - name: volatility_20d
+    label: 20日波动率
+    weight: 0.12
+    direction: low
+    source: price
+  - name: volume_surge
+    label: 量能放大
+    weight: 0.10
+    direction: high
+    source: price
+  - name: ma_trend
+    label: MA20趋势
+    weight: 0.08
+    direction: high
+    source: price
+  - name: roe
+    label: ROE
+    weight: 0.12
+    direction: high
+    source: fundamental
+  - name: revenue_yoy
+    label: 营收同比
+    weight: 0.10
+    direction: high
+    source: fundamental
+  - name: net_margin
+    label: 净利率
+    weight: 0.08
+    direction: high
+    source: fundamental

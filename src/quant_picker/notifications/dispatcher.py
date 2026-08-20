@@ -21,6 +21,7 @@ from quant_picker.storage.repository import Repository
 class NotificationDispatcher:
     DAILY_LOG_TAG = "daily"
     BUY_SELL_LOG_TAG = "buy_sell"
+    INTRADAY_INTERVALS = ("1h", "1m")
 
     def __init__(self, repo: Repository):
         load_env()
@@ -68,6 +69,17 @@ class NotificationDispatcher:
         )
         return result
 
+    def _effective_trigger(self, item: WatchlistItem) -> str:
+        """Pick the trigger for this item's K-line interval.
+
+        日线一天只出一根 K 线，每日汇总正好一条。时/分线套用同一套逻辑会被
+        `dedupe_by_date` 压成每天一条（后续信号全部丢失），若改成逐根推送又会
+        刷屏，所以日内周期默认只在 buy/hold/sell 发生变化时推送。
+        """
+        if item.interval in self.INTRADAY_INTERVALS:
+            return str(self.settings.get("intraday_trigger", "signal_change"))
+        return str(self.settings.get("trigger", "daily_summary"))
+
     def notify_after_update(
         self,
         item: WatchlistItem,
@@ -80,7 +92,7 @@ class NotificationDispatcher:
             return
 
         self._reload_settings()
-        trigger = self.settings.get("trigger", "daily_summary")
+        trigger = self._effective_trigger(item)
         if trigger == "buy_sell":
             self._notify_buy_sell(item, recommendations, bar_time, reference_price)
         elif trigger == "daily_summary":

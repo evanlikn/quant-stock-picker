@@ -164,6 +164,42 @@ class NotificationLog(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ScreenerRun(Base):
+    __tablename__ = "screener_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    market: Mapped[str] = mapped_column(String(8), nullable=False)
+    universe_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    universe_size: Mapped[int] = mapped_column(Integer, default=0)
+    screened_count: Mapped[int] = mapped_column(Integer, default=0)
+    top_n: Mapped[int] = mapped_column(Integer, default=100)
+    factor_config_json: Mapped[str] = mapped_column(Text, default="[]")
+    warnings_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ScreenerResult(Base):
+    __tablename__ = "screener_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    tf_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    market: Mapped[str] = mapped_column(String(8), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    composite_score: Mapped[float] = mapped_column(Float, default=0.0)
+    factor_scores_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "rank", name="uq_screener_rank"),
+        Index("ix_screener_run", "run_id"),
+    )
+
+
 _engine = None
 _Session = None
 

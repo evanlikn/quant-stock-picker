@@ -14,6 +14,25 @@ _PERIOD: dict[str, str] = {"1d": "1d", "1h": "60m", "1m": "1m"}
 _MAX_BARS = 10_000
 
 
+def _intraday_error_hint(exc_msg: str) -> str:
+    import os
+
+    from quant_picker.config import load_env
+
+    load_env()
+    has_key = bool(os.getenv("TICKFLOW_API_KEY", "").strip())
+    if "无分钟K线查询权限" in exc_msg:
+        if has_key:
+            return (
+                "当前 TICKFLOW_API_KEY 已配置，但账号无分钟/小时 K 线权限；"
+                "请在 tickflow.org 开通支持分钟数据的套餐。"
+            )
+        return "分钟级 K 线需配置 TICKFLOW_API_KEY，并使用支持分钟数据的套餐（免费服务仅日K）。"
+    if not has_key:
+        return "分钟级 K 线需配置 TICKFLOW_API_KEY（免费服务仅支持日K）。"
+    return ""
+
+
 def _default_count(interval: Interval) -> int:
     history = load_settings().get("scheduler", {}).get("initial_history", {})
     window = history.get(interval, "365d")
@@ -78,10 +97,11 @@ class TickFlowProvider:
             raw = tf.klines.get(tf_symbol, **kwargs)
         except Exception as exc:
             if interval != "1d":
-                raise ValueError(
-                    f"获取 {tf_symbol} {interval} 行情失败: {exc}。"
-                    "分钟级 K 线需配置 TICKFLOW_API_KEY（免费服务仅支持日K）。"
-                ) from exc
+                hint = _intraday_error_hint(str(exc))
+                msg = f"获取 {tf_symbol} {interval} 行情失败: {exc}"
+                if hint:
+                    msg += f"。{hint}"
+                raise ValueError(msg) from exc
             raise ValueError(f"无法获取 {tf_symbol} 的行情数据: {exc}") from exc
 
         bars = _normalize_klines(raw)
