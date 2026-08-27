@@ -26,6 +26,14 @@ def should_retrain(item: WatchlistItem) -> bool:
     return item.bars_since_optimization >= cycle
 
 
+def enabled_strategy_names() -> list[str]:
+    return [
+        s["name"]
+        for s in load_strategies_config().get("strategies", [])
+        if s.get("enabled", True)
+    ]
+
+
 class Trainer:
     def __init__(self, repo: Repository):
         self.repo = repo
@@ -55,6 +63,45 @@ class Trainer:
             self.repo.update_watchlist(item)
         return stored
 
+    def adopt_shared_params(self, item: WatchlistItem) -> bool:
+        """Reuse walk-forward output that another watchlist row already produced.
+
+        Optimized params are keyed by (symbol, market, interval) and shared by
+        everyone, so once several users watch the same stock a plain
+        `should_retrain` check would run the identical multi-minute optimization
+        once per user. If the shared row is newer than this item's own
+        optimization, adopt it and skip straight to analysis.
+        """
+        strategies = enabled_strategy_names()
+        if not strategies:
+            return False
+        rows = {
+            row.strategy_name: row
+            for row in self.repo.list_adaptive_params(
+                item.symbol, item.market, item.interval
+            )
+        }
+        if any(name not in rows for name in strategies):
+            return False
+
+        latest = max(rows[name].optimized_at for name in strategies)
+        if item.last_optimized_at is not None and latest <= item.last_optimized_at:
+            return False
+
+        if item.retrain_cycle_bars is None:
+            cycle = self.repo.shared_retrain_cycle(
+                item.symbol, item.market, item.interval, exclude_id=item.id
+            )
+            if cycle:
+                item.retrain_cycle_bars = cycle
+                item.retrain_cycle_source = "wfo"
+        item.last_optimized_at = latest
+        item.last_optimized_bar_time = item.last_bar_time
+        item.bars_since_optimization = 0
+        item.wfo_status = "done"
+        self.repo.update_watchlist(item)
+        return True
+
     def run_walk_forward(
         self, item: WatchlistItem, force: bool = False
     ) -> WatchlistItem:
@@ -72,11 +119,7 @@ class Trainer:
                 self.repo.update_watchlist(item)
                 return item
 
-            strategies_cfg = [
-                s["name"]
-                for s in load_strategies_config().get("strategies", [])
-                if s.get("enabled", True)
-            ]
+            strategies_cfg = enabled_strategy_names()
             proxy = strategies_cfg[0] if strategies_cfg else "ma_cross"
             best_step, _ = self.wfo.find_best_step_bars(df, proxy, item.interval)
 

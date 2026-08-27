@@ -12,24 +12,22 @@ os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 import pandas as pd
 import streamlit as st
 
+from quant_picker.auth.guard import render_sidebar_account, require_login
 from quant_picker.config import load_screener_config
 from quant_picker.screener.runner import ScreenerRunner
-from quant_picker.storage.db import get_session_factory, init_db
+from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 
 st.set_page_config(page_title="多因子选股", page_icon="🧮", layout="wide")
 
 _MARKET_LABELS = {"cn": "A股", "hk": "港股", "us": "美股"}
 
-
-@st.cache_resource
-def _session_factory():
-    init_db()
-    return get_session_factory()
+user = require_login()
+render_sidebar_account(user)
 
 
 def _repo() -> Repository:
-    return Repository(_session_factory()())
+    return Repository(web_session(), user.id)
 
 
 def _factor_labels() -> dict[str, str]:

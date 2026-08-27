@@ -10,98 +10,183 @@ os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 
 import streamlit as st
 
-from quant_picker.config import load_settings, save_notification_flags
-from quant_picker.notifications.dispatcher import NotificationDispatcher
+from quant_picker.auth import service
+from quant_picker.auth.guard import render_sidebar_account, require_login
+from quant_picker.config import load_settings
 from quant_picker.notifications.config_status import email_config_status, wpush_config_status
-from quant_picker.storage.db import get_session_factory, init_db
+from quant_picker.notifications.credentials import WPUSH_CHANNEL
+from quant_picker.notifications.dispatcher import NotificationDispatcher
+from quant_picker.security.crypto import SecretUndecryptable, decrypt_secret, mask_secret
+from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 
 st.set_page_config(page_title="推送设置", page_icon="🔔", layout="wide")
-init_db()
-repo = Repository(get_session_factory()())
-dispatcher = NotificationDispatcher(repo)
-notif_cfg = load_settings().get("notifications", {})
+user = require_login()
+render_sidebar_account(user)
 
+session = web_session()
+repo = Repository(session, user.id)
+dispatcher = NotificationDispatcher(repo)
+defaults = load_settings().get("notifications", {})
+
+_TRIGGER_OPTIONS = ["daily_summary", "signal_change"]
 _TRIGGER_LABELS = {
-    "daily_summary": "每日建议汇总（收盘更新后推送，买入/卖出/观望均提醒）",
-    "buy_sell": "每日建议汇总（与 daily_summary 相同，兼容旧配置）",
-    "signal_change": "建议变化（仅当 buy/hold/sell 相对上次发生变化时推送）",
+    "daily_summary": "每日汇总（收盘更新后推送，买入/卖出/观望均提醒）",
+    "buy_sell": "每日汇总（等同 daily_summary，兼容旧配置）",
+    "signal_change": "仅建议变化（buy/hold/sell 相对上次变化时才推送）",
 }
+_UNCHANGED = "………"
+
+
+def _stored_secret(ciphertext: str | None) -> str | None:
+    """Decrypted value, or None when nothing is stored or the key changed."""
+    try:
+        return decrypt_secret(ciphertext)
+    except SecretUndecryptable:
+        return None
+
+
+setting = service.get_or_create_notification_setting(session, user.id)
+config = service.resolve_notify_config(session, user.id, defaults)
 
 st.title("推送设置")
-trigger = notif_cfg.get("trigger", "daily_summary")
 st.caption(
-    f"邮件与微信（WPUSH）独立配置、独立发送；单渠道失败不影响另一渠道。"
-    f" 当前推送策略：`{trigger}` — {_TRIGGER_LABELS.get(trigger, trigger)}"
-    "（在 `config/settings.yaml` 的 `notifications.trigger` 修改）"
+    f"当前账号：**{user.display_name}**。以下配置只对你自己生效，"
+    "邮件与微信（WPUSH）独立发送，单渠道失败不影响另一渠道。"
 )
 
-col_email, col_wpush = st.columns(2)
+if config.needs_recredential:
+    lost = [
+        name
+        for name, broken in (("邮件密码", config.email_unreadable), ("WPUSH APIKEY", config.wpush_unreadable))
+        if broken
+    ]
+    st.error(
+        f"**{'、'.join(lost)} 无法解密**，相关推送已自动停用。"
+        "服务器上的 `QUANT_PICKER_SECRET_KEY` 与保存这些凭据时用的密钥不一致"
+        "（通常是恢复数据库时没有一并恢复 `config/.env`）。"
+        "已保存的密文无法找回，请在下方重新填写并保存。",
+        icon="🔑",
+    )
 
-with col_email:
-    st.subheader("📧 邮件推送")
-    email_ok, email_msg = email_config_status()
-    st.markdown(f"**配置状态**: {'✅' if email_ok else '⚠️'} {email_msg}")
-    st.markdown(
-        "在 `config/.env` 中配置：`SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、"
-        "`SMTP_PASSWORD`、`EMAIL_TO`"
-    )
-    email_enabled = st.toggle(
-        "启用邮件推送",
-        value=bool(notif_cfg.get("email_enabled", True)),
-        key="email_enabled_toggle",
-    )
-    if st.button("发送邮件测试", type="primary", key="test_email"):
-        result = dispatcher.send_test_email()
+email_ok, email_msg = email_config_status(config.email)
+wpush_ok, wpush_msg = wpush_config_status(config.wpush)
+
+with st.form("notify_form"):
+    col_email, col_wpush = st.columns(2)
+
+    with col_email:
+        st.subheader("📧 邮件推送")
+        st.markdown(f"**当前状态**: {'✅' if email_ok else '⚠️'} {email_msg}")
+        email_enabled = st.toggle("启用邮件推送", value=bool(setting.email_enabled))
+        smtp_host = st.text_input(
+            "SMTP 服务器", value=setting.smtp_host or "", placeholder="smtp.qq.com"
+        )
+        smtp_port = st.number_input(
+            "SMTP 端口（SSL）", min_value=1, max_value=65535, value=int(setting.smtp_port or 465)
+        )
+        smtp_user = st.text_input(
+            "发件邮箱", value=setting.smtp_user or "", placeholder="you@example.com"
+        )
+        stored_pwd = _stored_secret(setting.smtp_password_enc)
+        smtp_password = st.text_input(
+            "发件密码 / 授权码",
+            value=_UNCHANGED if stored_pwd else "",
+            type="password",
+            help=f"已保存: {mask_secret(stored_pwd)}" if stored_pwd else "多数邮箱需使用授权码而非登录密码",
+        )
+        email_to = st.text_input("收件邮箱", value=setting.email_to or "")
+
+    with col_wpush:
+        st.subheader("💬 微信推送 (WPUSH)")
+        st.markdown(f"**当前状态**: {'✅' if wpush_ok else '⚠️'} {wpush_msg}")
+        wechat_enabled = st.toggle("启用微信推送", value=bool(setting.wechat_enabled))
+        stored_key = _stored_secret(setting.wpush_apikey_enc)
+        wpush_apikey = st.text_input(
+            "WPUSH APIKEY",
+            value=_UNCHANGED if stored_key else "",
+            type="password",
+            help=f"已保存: {mask_secret(stored_key)}" if stored_key else "在 wpush.cn 控制台获取",
+        )
+        st.caption(
+            f"推送通道：`{WPUSH_CHANNEL}`（微信公众号模板消息，由 WPUSH 定义，不可修改）"
+        )
+
+        st.markdown("**推送策略**")
+        trigger = st.selectbox(
+            "日K 推送策略",
+            _TRIGGER_OPTIONS,
+            index=_TRIGGER_OPTIONS.index(
+                setting.trigger if setting.trigger in _TRIGGER_OPTIONS else "daily_summary"
+            ),
+            format_func=lambda x: _TRIGGER_LABELS.get(x, x),
+        )
+        intraday_trigger = st.selectbox(
+            "时K/分K 推送策略",
+            _TRIGGER_OPTIONS,
+            index=_TRIGGER_OPTIONS.index(
+                setting.intraday_trigger
+                if setting.intraday_trigger in _TRIGGER_OPTIONS
+                else "signal_change"
+            ),
+            format_func=lambda x: _TRIGGER_LABELS.get(x, x),
+            help="日内周期出线频繁，选「每日汇总」会被每日去重压成一条，建议保留「仅建议变化」",
+        )
+
+    if st.form_submit_button("保存配置", type="primary"):
+        service.save_notification_setting(
+            session,
+            user.id,
+            email_enabled=email_enabled,
+            wechat_enabled=wechat_enabled,
+            trigger=trigger,
+            intraday_trigger=intraday_trigger,
+            smtp_host=smtp_host,
+            smtp_port=int(smtp_port),
+            smtp_user=smtp_user,
+            smtp_password=None if smtp_password == _UNCHANGED else smtp_password,
+            email_to=email_to,
+            wpush_apikey=None if wpush_apikey == _UNCHANGED else wpush_apikey,
+        )
+        st.success("已保存")
+        st.rerun()
+
+test_email_col, test_wpush_col = st.columns(2)
+with test_email_col:
+    if st.button("发送邮件测试", use_container_width=True):
+        result = dispatcher.send_test_email(user.id)
         if result.ok:
             st.success("邮件发送成功")
         else:
             st.error(f"邮件发送失败: {result.error or '未知错误'}")
-
-with col_wpush:
-    st.subheader("💬 微信推送 (WPUSH)")
-    wpush_ok, wpush_msg = wpush_config_status()
-    st.markdown(f"**配置状态**: {'✅' if wpush_ok else '⚠️'} {wpush_msg}")
-    st.markdown(
-        "在 `config/.env` 中配置：`WPUSH_APIKEY`、可选 `WPUSH_CHANNEL`（默认 wechat）"
-    )
-    wpush_enabled = st.toggle(
-        "启用微信推送",
-        value=bool(notif_cfg.get("wechat_enabled", True)),
-        key="wpush_enabled_toggle",
-    )
-    if st.button("发送微信测试", type="primary", key="test_wpush"):
-        result = dispatcher.send_test_wpush()
+with test_wpush_col:
+    if st.button("发送微信测试", use_container_width=True):
+        result = dispatcher.send_test_wpush(user.id)
         if result.ok:
             st.success("微信推送成功")
         else:
             st.error(f"微信推送失败: {result.error or '未知错误'}")
 
-if st.button("保存推送开关"):
-    save_notification_flags(email_enabled=email_enabled, wpush_enabled=wpush_enabled)
-    dispatcher._reload_settings()
-    st.success("已保存到 config/settings.yaml")
-    st.rerun()
-
 st.divider()
-log_filter = st.radio("推送日志筛选", ["全部", "邮件", "微信"], horizontal=True)
+st.subheader("最近推送日志")
+st.caption("只显示你自己自选股产生的推送记录。")
+log_filter = st.radio("筛选渠道", ["全部", "邮件", "微信"], horizontal=True)
 channel_map = {"邮件": "email", "微信": "wpush"}
 logs = repo.list_notification_logs(50)
 if log_filter != "全部":
-    logs = [l for l in logs if l.channel == channel_map[log_filter]]
+    logs = [entry for entry in logs if entry.channel == channel_map[log_filter]]
 
-st.subheader("最近推送日志")
 if logs:
     st.dataframe(
         [
             {
-                "时间": l.sent_at,
-                "渠道": {"email": "邮件", "wpush": "微信"}.get(l.channel, l.channel),
-                "状态": l.status,
-                "策略": l.strategy_name,
-                "错误": l.error_message or "",
+                "时间": entry.sent_at,
+                "渠道": {"email": "邮件", "wpush": "微信"}.get(entry.channel, entry.channel),
+                "状态": entry.status,
+                "策略": entry.strategy_name,
+                "错误": entry.error_message or "",
             }
-            for l in logs
+            for entry in logs
         ],
         use_container_width=True,
     )

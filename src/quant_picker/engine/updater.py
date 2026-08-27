@@ -28,10 +28,10 @@ class Updater:
         prev_recs = self.repo.latest_recommendations(item.id)
         prev_map = {r.strategy_name: r for r in prev_recs}
 
+        self.trainer.fetch_and_store_bars(item)
         if force_retrain or should_retrain(item):
-            item = self.trainer.run_walk_forward(item, force=force_retrain)
-        else:
-            self.trainer.fetch_and_store_bars(item)
+            if force_retrain or not self.trainer.adopt_shared_params(item):
+                item = self.trainer.run_walk_forward(item, force=force_retrain)
 
         if item.wfo_status != "done":
             return item

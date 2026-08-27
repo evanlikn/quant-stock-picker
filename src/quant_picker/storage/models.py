@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import logging
+import os
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
+
+try:
+    import fcntl  # POSIX only; used to serialise first-time schema setup
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from sqlalchemy import (
     Boolean,
@@ -16,7 +25,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from quant_picker.config import database_schema, database_url, uses_postgresql
+from quant_picker.config import (
+    database_schema,
+    database_url,
+    pg_idle_transaction_timeout,
+    project_root,
+    sqlite_busy_timeout,
+    uses_postgresql,
+)
+
+logger = logging.getLogger(__name__)
 
 _PG_SCHEMA = database_schema() if uses_postgresql() else None
 
@@ -25,10 +43,53 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema=_PG_SCHEMA)
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("username", name="uq_user_username"),)
+
+
+class UserNotificationSetting(Base):
+    """Per-user push channels and credentials (secrets stored encrypted)."""
+
+    __tablename__ = "user_notification_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    email_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    wechat_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    trigger: Mapped[str] = mapped_column(String(16), default="daily_summary")
+    intraday_trigger: Mapped[str] = mapped_column(String(16), default="signal_change")
+    smtp_host: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    smtp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    smtp_user: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    smtp_password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_to: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    wpush_apikey_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wpush_channel: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Which QUANT_PICKER_SECRET_KEY encrypted the columns above, so a replaced
+    # key is reported at startup instead of surfacing as a failed push.
+    key_fingerprint: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("user_id", name="uq_user_notify"),)
+
+
 class WatchlistItem(Base):
     __tablename__ = "watchlist_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     market: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -53,7 +114,10 @@ class WatchlistItem(Base):
     position_entry_bar_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     position_trailing_stop: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    __table_args__ = (UniqueConstraint("symbol", "market", "interval", name="uq_watch"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "symbol", "market", "interval", name="uq_watch_user"),
+        Index("ix_watchlist_user", "user_id"),
+    )
 
 
 class Bar(Base):
@@ -204,18 +268,52 @@ _engine = None
 _Session = None
 
 
+def _tune_sqlite(engine) -> None:
+    """Make a file-backed SQLite usable from the web and scheduler at once.
+
+    Both processes write (scheduler stores bars and recommendations, the web
+    stores watchlists and settings). The default rollback journal makes a writer
+    block readers, so a page refresh during a sync would fail with
+    "database is locked". WAL lets readers run during a write, and the busy
+    timeout absorbs the remaining writer-vs-writer overlap.
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _set_pragmas(dbapi_conn, _record):  # noqa: ANN001
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+
 def get_engine():
     global _engine
     if _engine is None:
         url = database_url()
         kwargs: dict = {"echo": False}
         if url.startswith("sqlite"):
-            kwargs["connect_args"] = {"check_same_thread": False}
+            kwargs["connect_args"] = {
+                "check_same_thread": False,
+                "timeout": sqlite_busy_timeout(),
+            }
         elif url.startswith("postgresql"):
             kwargs["pool_pre_ping"] = True
             schema = database_schema()
-            kwargs["connect_args"] = {"options": f"-csearch_path={schema}"}
+            # Last line of defence for a transaction nothing ever closes: such a
+            # connection holds table locks indefinitely and blocks migrations.
+            # The server drops it instead of letting it sit there for hours.
+            idle_ms = int(pg_idle_transaction_timeout() * 1000)
+            options = f"-csearch_path={schema}"
+            if idle_ms > 0:
+                options += f" -cidle_in_transaction_session_timeout={idle_ms}"
+            kwargs["connect_args"] = {"options": options}
         _engine = create_engine(url, **kwargs)
+        if url.startswith("sqlite") and ":memory:" not in url and url != "sqlite://":
+            _tune_sqlite(_engine)
     return _engine
 
 
@@ -226,10 +324,207 @@ def get_session_factory():
     return _Session
 
 
+# Arbitrary constant; only has to be stable across processes of this app.
+_SCHEMA_LOCK_KEY = 0x9114_C4E2
+
+
+@contextmanager
+def _schema_lock(engine):
+    """Serialise first-time setup across processes.
+
+    systemd starts the web and scheduler units together, so on a fresh database
+    both reach CREATE TABLE at the same moment. SQLite then fails the loser with
+    "database is locked" and PostgreSQL with a duplicate table error, leaving one
+    of the two services dead. The same window would also let both processes
+    generate a secret key and write a different one each.
+    """
+    from sqlalchemy import text
+
+    if uses_postgresql():
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+            conn.commit()
+            try:
+                yield
+            finally:
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY}
+                )
+                conn.commit()
+        return
+
+    lock_path = _sqlite_lock_path(engine)
+    if lock_path is None or fcntl is None:  # in-memory database, or non-POSIX
+        yield
+        return
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _sqlite_lock_path(engine) -> Path | None:
+    database = engine.url.database
+    if not database or database == ":memory:":
+        return None
+    return Path(f"{database}.initlock")
+
+
 def init_db() -> None:
+    from quant_picker.security.crypto import ensure_secret_key
+
     engine = get_engine()
-    Base.metadata.create_all(engine)
-    _migrate_schema(engine)
+    with _schema_lock(engine):
+        Base.metadata.create_all(engine)
+        ensure_secret_key()
+        _migrate_schema(engine)
+
+
+def _qualified(table: str) -> str:
+    if uses_postgresql():
+        return f"{database_schema()}.{table}"
+    return table
+
+
+def _bootstrap_admin_id(engine) -> int:
+    """Return the account that inherits pre-multi-user data, creating it if needed."""
+    from sqlalchemy import text
+
+    from quant_picker.auth.passwords import hash_password
+    from quant_picker.security.crypto import random_password
+
+    users = _qualified("users")
+    with engine.begin() as conn:
+        row = conn.execute(text(f"SELECT id FROM {users} ORDER BY id LIMIT 1")).first()
+        if row:
+            return int(row[0])
+
+        username = os.getenv("QUANT_PICKER_ADMIN_USERNAME", "").strip() or "admin"
+        password = os.getenv("QUANT_PICKER_ADMIN_PASSWORD", "").strip()
+        generated = not password
+        if generated:
+            password = random_password()
+        conn.execute(
+            text(
+                f"INSERT INTO {users} "
+                "(username, display_name, password_hash, is_admin, is_active, created_at) "
+                "VALUES (:u, :d, :h, :admin, :active, :created)"
+            ),
+            {
+                "u": username,
+                "d": "管理员",
+                "h": hash_password(password),
+                "admin": True,
+                "active": True,
+                "created": datetime.utcnow(),
+            },
+        )
+        new_id = conn.execute(
+            text(f"SELECT id FROM {users} WHERE username = :u"), {"u": username}
+        ).scalar_one()
+
+    if generated:
+        _persist_bootstrap_password(username, password)
+    logger.warning("已创建初始管理员账号 %s", username)
+    return int(new_id)
+
+
+def _persist_bootstrap_password(username: str, password: str) -> None:
+    path = project_root() / "data" / "bootstrap_admin_password.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"用户名: {username}\n密码: {password}\n（首次登录后请修改密码并删除本文件）\n",
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    logger.warning("初始管理员密码已写入 %s，请登录后修改并删除该文件", path)
+
+
+def _migrate_watchlist_owner(engine, insp) -> None:
+    """Add watchlist_items.user_id and move existing rows to the bootstrap admin."""
+    from sqlalchemy import text
+
+    table = _qualified("watchlist_items")
+    cols = {c["name"] for c in insp.get_columns("watchlist_items")}
+
+    # 必须无条件执行：全新库由 create_all 直接建出带 user_id 的表，不会走下面的
+    # 迁移分支，若把建号放在分支里，新部署会一个账号都没有，谁也登不进去。
+    admin_id = _bootstrap_admin_id(engine)
+
+    if "user_id" not in cols:
+        _run_ddl(engine, [f"ALTER TABLE {table} ADD COLUMN user_id INTEGER"])
+        # Separate transaction, and idempotent, so a crash between the two
+        # leaves rows that the next start still backfills instead of orphaning.
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(f"UPDATE {table} SET user_id = :uid WHERE user_id IS NULL"),
+                {"uid": admin_id},
+            )
+        logger.warning("已将 %s 条自选归属到初始管理员", result.rowcount)
+        if uses_postgresql():
+            _run_ddl(engine, [f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"])
+
+    if not uses_postgresql():
+        # SQLite cannot drop a table-level constraint; a legacy file DB keeps the
+        # old (symbol, market, interval) uniqueness and blocks shared symbols.
+        names = {c["name"] for c in insp.get_unique_constraints("watchlist_items")}
+        if "uq_watch" in names:
+            logger.warning(
+                "SQLite 无法替换 uq_watch 约束，不同用户将无法收藏同一只股票；"
+                "请迁移到 PostgreSQL 或重建数据库文件"
+            )
+        return
+
+    constraints = {c["name"] for c in insp.get_unique_constraints("watchlist_items")}
+    if "uq_watch_user" not in constraints:
+        _run_ddl(
+            engine,
+            [
+                f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS uq_watch",
+                f"ALTER TABLE {table} ADD CONSTRAINT uq_watch_user "
+                "UNIQUE (user_id, symbol, market, interval)",
+            ],
+        )
+        logger.warning("已将自选唯一约束替换为 uq_watch_user")
+
+    _run_ddl(engine, [f"CREATE INDEX IF NOT EXISTS ix_watchlist_user ON {table} (user_id)"])
+
+
+class MigrationBlocked(RuntimeError):
+    """A schema change could not acquire its lock within the timeout."""
+
+
+def _run_ddl(engine, statements: list[str]) -> None:
+    """Apply DDL, failing fast and legibly when another session holds the lock.
+
+    ALTER TABLE needs an exclusive lock, so a single long-lived reader (one
+    stale Streamlit session sitting "idle in transaction" is enough) makes it
+    wait forever. init_db() runs on every web and scheduler start, so an
+    unbounded wait means the app never finishes booting and prints nothing to
+    explain why.
+    """
+    from sqlalchemy import exc, text
+
+    try:
+        with engine.begin() as conn:
+            if uses_postgresql():
+                conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            for sql in statements:
+                conn.execute(text(sql))
+    except exc.DBAPIError as err:
+        if getattr(err.orig, "sqlstate", None) != "55P03":  # lock_not_available
+            raise
+        raise MigrationBlocked(
+            "数据库结构升级被其他连接阻塞（通常是仍在运行的 Web 或 scheduler 进程，"
+            "或残留的 idle in transaction 连接）。请先停掉这些进程再启动，"
+            "或执行：SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE state = 'idle in transaction';"
+        ) from err
 
 
 def _migrate_schema(engine) -> None:
@@ -261,8 +556,7 @@ def _migrate_schema(engine) -> None:
         additions.append(("history_days", "INTEGER"))
 
     for col, ddl in additions:
-        with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+        _run_ddl(engine, [f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"])
 
     if insp.has_table("strategy_positions"):
         pos_table = "strategy_positions"
@@ -270,5 +564,17 @@ def _migrate_schema(engine) -> None:
             pos_table = f"{database_schema()}.{pos_table}"
         pos_cols = {c["name"] for c in insp.get_columns("strategy_positions")}
         if "trailing_stop" not in pos_cols:
-            with engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE {pos_table} ADD COLUMN trailing_stop FLOAT"))
+            _run_ddl(engine, [f"ALTER TABLE {pos_table} ADD COLUMN trailing_stop FLOAT"])
+
+    if insp.has_table("user_notification_settings"):
+        notify_cols = {c["name"] for c in insp.get_columns("user_notification_settings")}
+        if "key_fingerprint" not in notify_cols:
+            _run_ddl(
+                engine,
+                [
+                    f"ALTER TABLE {_qualified('user_notification_settings')} "
+                    "ADD COLUMN key_fingerprint VARCHAR(32)"
+                ],
+            )
+
+    _migrate_watchlist_owner(engine, inspect(engine))

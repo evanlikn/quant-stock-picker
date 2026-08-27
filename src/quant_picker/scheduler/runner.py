@@ -7,7 +7,13 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from quant_picker.config import auto_sync_intervals, load_settings, market_daily_run_schedule
+from quant_picker.config import (
+    auto_sync_intervals,
+    load_settings,
+    log_level,
+    market_daily_run_schedule,
+    scheduler_timezone,
+)
 from quant_picker.engine.updater import Updater
 from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.repository import Repository
@@ -47,11 +53,11 @@ def run_market_interval_updates(market: str, interval: str) -> None:
     session = get_session_factory()()
     repo = Repository(session)
     updater = Updater(repo)
-    tz = ZoneInfo(load_settings().get("scheduler", {}).get("timezone", "Asia/Shanghai"))
+    tz = ZoneInfo(scheduler_timezone())
     now = datetime.now(tz)
     market_key = market.lower()
 
-    for item in repo.list_watchlist(enabled_only=True):
+    for item in repo.list_all_watchlist(enabled_only=True):
         if item.interval != interval:
             continue
         if item.market.lower() != market_key:
@@ -73,10 +79,10 @@ def run_interval_updates(interval: str) -> None:
     session = get_session_factory()()
     repo = Repository(session)
     updater = Updater(repo)
-    tz = ZoneInfo(load_settings().get("scheduler", {}).get("timezone", "Asia/Shanghai"))
+    tz = ZoneInfo(scheduler_timezone())
     now = datetime.now(tz)
 
-    for item in repo.list_watchlist(enabled_only=True):
+    for item in repo.list_all_watchlist(enabled_only=True):
         if item.interval != interval:
             continue
         if interval in ("1h", "1m") and not _in_trading_hours(now, item.market.lower()):
@@ -148,7 +154,7 @@ def _warn_uncovered_intervals(sync_intervals: set[str]) -> None:
     try:
         repo = Repository(session)
         uncovered: dict[str, list[str]] = {}
-        for item in repo.list_watchlist(enabled_only=True):
+        for item in repo.list_all_watchlist(enabled_only=True):
             if item.interval not in sync_intervals:
                 uncovered.setdefault(item.interval, []).append(item.symbol)
     finally:
@@ -162,16 +168,30 @@ def _warn_uncovered_intervals(sync_intervals: set[str]) -> None:
         )
 
 
+def _audit_credentials() -> None:
+    """Surface a replaced secret key at startup, not at push time."""
+    from quant_picker.auth.service import warn_on_credential_key_change
+
+    with get_session_factory()() as session:
+        broken = warn_on_credential_key_change(session)
+    if broken:
+        print(
+            "[warn] 以下用户的推送凭据无法解密（QUANT_PICKER_SECRET_KEY 已变更或丢失），"
+            f"推送已停用，请在「推送设置」页重新填写：{'、'.join(broken)}"
+        )
+
+
 def main() -> None:
     import sys
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     if "--once" in sys.argv:
         init_db()
+        _audit_credentials()
         idx = sys.argv.index("--once")
         market = sys.argv[idx + 1].lower() if idx + 1 < len(sys.argv) else None
         if market and market not in SUPPORTED_MARKETS:
@@ -183,9 +203,8 @@ def main() -> None:
         return
 
     init_db()
-    settings = load_settings()
-    sched_cfg = settings.get("scheduler", {})
-    tz = sched_cfg.get("timezone", "Asia/Shanghai")
+    _audit_credentials()
+    tz = scheduler_timezone()
 
     scheduler = BlockingScheduler(timezone=tz)
     sync_intervals = set(auto_sync_intervals())

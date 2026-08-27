@@ -17,15 +17,17 @@ from quant_picker.backtest.report import BacktestReport
 from quant_picker.config import load_strategies_config
 from quant_picker.data.bar_sync import BarSyncService
 from quant_picker.data.bars_util import bars_calendar_span_days, bars_cover_history, effective_history_days
-from quant_picker.storage.db import get_session_factory, init_db
+from quant_picker.auth.guard import render_sidebar_account, require_login
+from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy
 from quant_picker.portfolio.position_sizer import get_position_sizing_config
 from quant_picker.web.charts import backtest_dashboard_figure, equity_curve_chart
 
 st.set_page_config(page_title="回测报告", page_icon="📊", layout="wide")
-init_db()
-repo = Repository(get_session_factory()())
+user = require_login()
+render_sidebar_account(user)
+repo = Repository(web_session(), user.id)
 
 st.title("回测报告")
 st.caption("展示 Walk-forward 优化后的 OOS 指标、全样本回测与 K 线买卖信号")

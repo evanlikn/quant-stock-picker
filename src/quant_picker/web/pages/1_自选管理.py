@@ -10,6 +10,7 @@ os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 
 import streamlit as st
 
+from quant_picker.auth.guard import render_sidebar_account, require_login
 from quant_picker.data.bars_util import initial_history_days
 from quant_picker.data.symbol_validate import SymbolNotFoundError, validate_symbol
 from quant_picker.engine.updater import Updater
@@ -29,6 +30,9 @@ from quant_picker.web.watchlist_common import (
 )
 
 st.set_page_config(page_title="自选管理", page_icon="⭐", layout="wide")
+
+_user = require_login()
+render_sidebar_account(_user)
 
 _restore_detail_query_param()
 _detail_id = parse_watchlist_id()
@@ -410,10 +414,17 @@ if submitted and symbol_in:
                     display_name=name,
                     history_days=int(history_days_in),
                 )
-                item = Trainer(watchlist_repo).run_walk_forward(item, force=True)
+                trainer = Trainer(watchlist_repo)
+                trainer.fetch_and_store_bars(item)
+                # 参数按 (代码, 市场, 周期) 共享，别人训练过就直接复用，
+                # 否则每多一个用户收藏同一只股票就要重跑一遍相同的 walk-forward
+                reused = trainer.adopt_shared_params(item)
+                if not reused:
+                    item = trainer.run_walk_forward(item, force=True)
                 if item.wfo_status == "done":
                     Updater(watchlist_repo).update_watchlist_item(item)
-            st.success(f"已加入 {sym}（{name}）· {interval_label}，训练状态: {item.wfo_status}")
+            suffix = "，已复用已有训练结果" if reused else f"，训练状态: {item.wfo_status}"
+            st.success(f"已加入 {sym}（{name}）· {interval_label}{suffix}")
     except SymbolNotFoundError as e:
         st.error(str(e))
     except Exception as e:

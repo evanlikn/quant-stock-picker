@@ -26,8 +26,46 @@ _BAR_INSERT_BATCH = 100
 
 
 class Repository:
-    def __init__(self, session: Session):
+    """Data access layer.
+
+    Market data (bars, walk-forward params, backtests, screener runs) is shared
+    by everyone; watchlists and everything hanging off them are per-user. Pass
+    ``user_id`` from the web layer so a request can never touch another
+    account's rows. The scheduler runs system-wide and leaves it unset.
+    """
+
+    def __init__(self, session: Session, user_id: int | None = None):
         self.session = session
+        self.user_id = user_id
+
+    def for_user(self, user_id: int) -> "Repository":
+        return Repository(self.session, user_id)
+
+    def _require_user(self) -> int:
+        if self.user_id is None:
+            raise PermissionError("该操作需要用户上下文（Repository 未绑定 user_id）")
+        return self.user_id
+
+    def _owns(self, item: WatchlistItem | None) -> bool:
+        if item is None:
+            return False
+        return self.user_id is None or item.user_id == self.user_id
+
+    def _assert_owns(self, watchlist_id: int) -> None:
+        """Reject watchlist ids belonging to another account."""
+        if self.user_id is None:
+            return
+        owner = self.session.scalar(
+            select(WatchlistItem.user_id).where(WatchlistItem.id == watchlist_id)
+        )
+        if owner != self.user_id:
+            raise PermissionError(f"无权访问自选 {watchlist_id}")
+
+    def _own_watchlist_ids(self):
+        """Subquery of the current user's watchlist ids, or None when unscoped."""
+        if self.user_id is None:
+            return None
+        return select(WatchlistItem.id).where(WatchlistItem.user_id == self.user_id)
 
     # --- Watchlist ---
     def add_watchlist(
@@ -39,6 +77,7 @@ class Repository:
         display_name: str | None = None,
         history_days: int | None = None,
     ) -> WatchlistItem:
+        user_id = self._require_user()
         existing = self.get_watchlist(symbol, market, interval)
         if existing:
             if display_name and not existing.display_name:
@@ -46,6 +85,7 @@ class Repository:
                 self.update_watchlist(existing)
             return existing
         item = WatchlistItem(
+            user_id=user_id,
             symbol=symbol,
             market=market,
             interval=interval,
@@ -65,26 +105,79 @@ class Repository:
             WatchlistItem.market == market,
             WatchlistItem.interval == interval,
         )
+        if self.user_id is not None:
+            q = q.where(WatchlistItem.user_id == self.user_id)
         return self.session.scalar(q)
 
     def get_watchlist_by_id(self, item_id: int) -> WatchlistItem | None:
-        return self.session.get(WatchlistItem, item_id)
+        item = self.session.get(WatchlistItem, item_id)
+        return item if self._owns(item) else None
 
     def list_watchlist(self, enabled_only: bool = False) -> list[WatchlistItem]:
+        q = select(WatchlistItem)
+        if self.user_id is not None:
+            q = q.where(WatchlistItem.user_id == self.user_id)
+        if enabled_only:
+            q = q.where(WatchlistItem.enabled.is_(True))
+        return list(self.session.scalars(q.order_by(WatchlistItem.added_at.desc())))
+
+    def list_all_watchlist(self, enabled_only: bool = False) -> list[WatchlistItem]:
+        """Every user's items; for the scheduler, which has no user context."""
         q = select(WatchlistItem)
         if enabled_only:
             q = q.where(WatchlistItem.enabled.is_(True))
         return list(self.session.scalars(q.order_by(WatchlistItem.added_at.desc())))
 
+    def distinct_watchlist_symbols(self, enabled_only: bool = True) -> list[tuple[str, str, str]]:
+        """Unique (symbol, market, interval) triples across all users.
+
+        Market data is shared, so syncing bars once per triple avoids repeating
+        the same download for every user watching the same stock.
+        """
+        q = select(
+            WatchlistItem.symbol, WatchlistItem.market, WatchlistItem.interval
+        ).distinct()
+        if enabled_only:
+            q = q.where(WatchlistItem.enabled.is_(True))
+        return [tuple(row) for row in self.session.execute(q)]
+
+    def shared_retrain_cycle(
+        self, symbol: str, market: str, interval: str, exclude_id: int | None = None
+    ) -> int | None:
+        """Retrain cadence another row already derived for the same instrument.
+
+        Walk-forward picks the cadence from the price series, which is shared, so
+        a new row for an already-trained stock can inherit it instead of showing
+        an unknown cycle until its first optimization.
+        """
+        q = select(WatchlistItem.retrain_cycle_bars).where(
+            WatchlistItem.symbol == symbol,
+            WatchlistItem.market == market,
+            WatchlistItem.interval == interval,
+            WatchlistItem.retrain_cycle_source == "wfo",
+            WatchlistItem.retrain_cycle_bars.is_not(None),
+        )
+        if exclude_id is not None:
+            q = q.where(WatchlistItem.id != exclude_id)
+        return self.session.scalar(q.limit(1))
+
     def update_watchlist(self, item: WatchlistItem) -> None:
+        if not self._owns(item):
+            raise PermissionError("无权修改他人的自选")
         self.session.add(item)
         self.session.commit()
 
     def delete_watchlist(self, item_id: int) -> None:
-        item = self.session.get(WatchlistItem, item_id)
+        item = self.get_watchlist_by_id(item_id)
         if item:
             self.session.execute(
                 delete(StrategyPosition).where(StrategyPosition.watchlist_id == item_id)
+            )
+            self.session.execute(
+                delete(Recommendation).where(Recommendation.watchlist_id == item_id)
+            )
+            self.session.execute(
+                delete(NotificationLog).where(NotificationLog.watchlist_id == item_id)
             )
             self.session.delete(item)
             self.session.commit()
@@ -363,6 +456,7 @@ class Repository:
         params_snapshot: dict,
         oos_snapshot: dict,
     ) -> Recommendation | None:
+        self._assert_owns(watchlist_id)
         existing = self.session.scalar(
             select(Recommendation).where(
                 Recommendation.watchlist_id == watchlist_id,
@@ -390,6 +484,7 @@ class Repository:
         return rec
 
     def latest_recommendations(self, watchlist_id: int) -> list[Recommendation]:
+        self._assert_owns(watchlist_id)
         items = self.session.scalars(
             select(Recommendation)
             .where(Recommendation.watchlist_id == watchlist_id)
@@ -406,6 +501,7 @@ class Repository:
     def previous_recommendations_before(
         self, watchlist_id: int, bar_time: datetime
     ) -> list[Recommendation]:
+        self._assert_owns(watchlist_id)
         return list(
             self.session.scalars(
                 select(Recommendation)
@@ -422,12 +518,18 @@ class Repository:
     ) -> list[Recommendation]:
         q = select(Recommendation).order_by(Recommendation.created_at.desc()).limit(limit)
         if watchlist_id:
+            self._assert_owns(watchlist_id)
             q = q.where(Recommendation.watchlist_id == watchlist_id)
+        else:
+            own_ids = self._own_watchlist_ids()
+            if own_ids is not None:
+                q = q.where(Recommendation.watchlist_id.in_(own_ids))
         return list(self.session.scalars(q))
 
     def last_buy_recommendation(
         self, watchlist_id: int, strategy_name: str
     ) -> Recommendation | None:
+        self._assert_owns(watchlist_id)
         return self.session.scalar(
             select(Recommendation)
             .where(
@@ -444,6 +546,7 @@ class Repository:
     def get_strategy_position(
         self, watchlist_id: int, strategy_name: str
     ) -> StrategyPosition | None:
+        self._assert_owns(watchlist_id)
         return self.session.scalar(
             select(StrategyPosition).where(
                 StrategyPosition.watchlist_id == watchlist_id,
@@ -452,6 +555,7 @@ class Repository:
         )
 
     def list_strategy_positions(self, watchlist_id: int) -> list[StrategyPosition]:
+        self._assert_owns(watchlist_id)
         return list(
             self.session.scalars(
                 select(StrategyPosition)
@@ -515,6 +619,7 @@ class Repository:
             self.session.commit()
 
     def clear_all_strategy_positions(self, watchlist_id: int) -> None:
+        self._assert_owns(watchlist_id)
         self.session.execute(
             delete(StrategyPosition).where(StrategyPosition.watchlist_id == watchlist_id)
         )
@@ -620,13 +725,11 @@ class Repository:
         )
 
     def list_notification_logs(self, limit: int = 20) -> list[NotificationLog]:
-        return list(
-            self.session.scalars(
-                select(NotificationLog)
-                .order_by(NotificationLog.sent_at.desc())
-                .limit(limit)
-            )
-        )
+        q = select(NotificationLog).order_by(NotificationLog.sent_at.desc()).limit(limit)
+        own_ids = self._own_watchlist_ids()
+        if own_ids is not None:
+            q = q.where(NotificationLog.watchlist_id.in_(own_ids))
+        return list(self.session.scalars(q))
 
     # --- Screener ---
     def create_screener_run(

@@ -11,16 +11,17 @@ os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 
 import streamlit as st
 
-from quant_picker.config import project_root
+from quant_picker.auth.guard import render_sidebar_account, require_login
 from quant_picker.engine.analyzer import Analyzer
-from quant_picker.storage.db import get_session_factory, init_db
+from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 
 st.set_page_config(page_title="量化选股", page_icon="📈", layout="wide")
 
-init_db()
-session = get_session_factory()()
-repo = Repository(session)
+user = require_login()
+render_sidebar_account(user)
+session = web_session()
+repo = Repository(session, user.id)
 analyzer = Analyzer(repo)
 
 st.title("量化选股分析")

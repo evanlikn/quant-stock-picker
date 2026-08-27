@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from quant_picker.config import load_env, load_settings
+from quant_picker.config import load_env, load_settings, scheduler_timezone
 from quant_picker.notifications.config_status import SendResult
 from quant_picker.notifications.email_notifier import EmailNotifier
 from quant_picker.notifications.formatter import (
@@ -33,8 +33,15 @@ class NotificationDispatcher:
     def _reload_settings(self) -> None:
         self.settings = load_settings().get("notifications", {})
 
+    def _notify_config(self, user_id: int):
+        """Resolve the owning user's channels and credentials."""
+        from quant_picker.auth.service import resolve_notify_config
+
+        self._reload_settings()
+        return resolve_notify_config(self.repo.session, user_id, self.settings)
+
     def _local_today(self) -> datetime.date:
-        tz_name = load_settings().get("scheduler", {}).get("timezone", "Asia/Shanghai")
+        tz_name = scheduler_timezone()
         return datetime.now(ZoneInfo(tz_name)).date()
 
     def _send_channel(
@@ -69,7 +76,7 @@ class NotificationDispatcher:
         )
         return result
 
-    def _effective_trigger(self, item: WatchlistItem) -> str:
+    def _effective_trigger(self, item: WatchlistItem, config) -> str:
         """Pick the trigger for this item's K-line interval.
 
         日线一天只出一根 K 线，每日汇总正好一条。时/分线套用同一套逻辑会被
@@ -77,8 +84,8 @@ class NotificationDispatcher:
         刷屏，所以日内周期默认只在 buy/hold/sell 发生变化时推送。
         """
         if item.interval in self.INTRADAY_INTERVALS:
-            return str(self.settings.get("intraday_trigger", "signal_change"))
-        return str(self.settings.get("trigger", "daily_summary"))
+            return config.intraday_trigger
+        return config.trigger
 
     def notify_after_update(
         self,
@@ -91,30 +98,24 @@ class NotificationDispatcher:
         if not item.notify_enabled or not recommendations:
             return
 
-        self._reload_settings()
-        trigger = self._effective_trigger(item)
-        if trigger == "buy_sell":
-            self._notify_buy_sell(item, recommendations, bar_time, reference_price)
-        elif trigger == "daily_summary":
-            self._notify_daily_summary(item, recommendations, bar_time, reference_price)
+        config = self._notify_config(item.user_id)
+        if not config.email_enabled and not config.wechat_enabled:
+            return
+
+        trigger = self._effective_trigger(item, config)
+        if trigger in ("buy_sell", "daily_summary"):
+            self._notify_daily_summary(
+                item, config, recommendations, bar_time, reference_price
+            )
         elif trigger == "signal_change":
             self._notify_signal_change(
-                item, recommendations, previous, bar_time, reference_price
+                item, config, recommendations, previous, bar_time, reference_price
             )
-
-    def _notify_buy_sell(
-        self,
-        item: WatchlistItem,
-        recommendations: list[Recommendation],
-        bar_time: datetime,
-        reference_price: float | None,
-    ) -> None:
-        """Legacy trigger name; sends all strategies (buy/hold/sell)."""
-        self._notify_daily_summary(item, recommendations, bar_time, reference_price)
 
     def _notify_daily_summary(
         self,
         item: WatchlistItem,
+        config,
         recommendations: list[Recommendation],
         bar_time: datetime,
         reference_price: float | None,
@@ -128,22 +129,22 @@ class NotificationDispatcher:
             item, recommendations, bar_time, reference_price
         )
 
-        if self.settings.get("email_enabled", True):
+        if config.email_enabled:
             self._send_channel(
                 "email",
                 item.id,
                 bar_time,
-                lambda: self.email.send(email_title, email_body),
+                lambda: self.email.send(config.email, email_title, email_body),
                 log_tag=self.DAILY_LOG_TAG,
                 dedupe_by_date=True,
             )
 
-        if self.settings.get("wechat_enabled", True):
+        if config.wechat_enabled:
             self._send_channel(
                 "wpush",
                 item.id,
                 bar_time,
-                lambda: self.wpush.send(wechat_title, wechat_body),
+                lambda: self.wpush.send(config.wpush, wechat_title, wechat_body),
                 log_tag=self.DAILY_LOG_TAG,
                 dedupe_by_date=True,
             )
@@ -151,6 +152,7 @@ class NotificationDispatcher:
     def _notify_signal_change(
         self,
         item: WatchlistItem,
+        config,
         new_recommendations: list[Recommendation],
         previous: list[Recommendation],
         bar_time: datetime,
@@ -166,23 +168,24 @@ class NotificationDispatcher:
         )
         change_bar_time = changes[0][0].bar_time
 
-        if self.settings.get("email_enabled", True):
+        if config.email_enabled:
             self._send_channel(
                 "email",
                 item.id,
                 change_bar_time,
-                lambda: self.email.send(title, body),
+                lambda: self.email.send(config.email, title, body),
             )
 
-        if self.settings.get("wechat_enabled", True):
+        if config.wechat_enabled:
             self._send_channel(
                 "wpush",
                 item.id,
                 change_bar_time,
-                lambda: self.wpush.send(title, body),
+                lambda: self.wpush.send(config.wpush, title, body),
             )
 
-    def send_test_email(self) -> SendResult:
+    def send_test_email(self, user_id: int) -> SendResult:
+        config = self._notify_config(user_id)
         title = "量化选股邮件测试"
         body = (
             "这是一条邮件测试消息。\n\n"
@@ -190,9 +193,10 @@ class NotificationDispatcher:
             "说明: 正式推送会附带信号 K 线收盘价作为参考执行价。\n\n"
             "⚠ 仅供参考，不构成投资建议"
         )
-        return self.email.send(title, body)
+        return self.email.send(config.email, title, body)
 
-    def send_test_wpush(self) -> SendResult:
+    def send_test_wpush(self, user_id: int) -> SendResult:
+        config = self._notify_config(user_id)
         title = "600519 贵州茅台"
         body = (
             "2026-07-14  收盘 ¥1688.00\n"
@@ -207,4 +211,4 @@ class NotificationDispatcher:
             "建议：观望\n"
             "理由：DIF 与 DEA 粘合"
         )
-        return self.wpush.send(title, body)
+        return self.wpush.send(config.wpush, title, body)

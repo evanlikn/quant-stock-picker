@@ -46,12 +46,25 @@ def load_screener_config() -> dict[str, Any]:
 
 
 def load_env() -> None:
+    """Layer deployment settings: real environment > .env > .env.example.
+
+    load_dotenv never overrides an existing variable, so loading .env first and
+    the example second makes the example a defaults layer. That matters because
+    the secret key is appended to a freshly created .env: without the fallback,
+    a one-line .env would silently drop every documented default.
+    """
     root = project_root()
     for candidate in (root / ".env", root / "config" / ".env"):
         if candidate.exists():
             load_dotenv(candidate)
-            return
-    load_dotenv(root / "config" / ".env.example", override=False)
+            break
+    load_dotenv(root / "config" / ".env.example")
+
+
+def env(name: str, default: str = "") -> str:
+    """Read a deployment setting from the .env file (or real environment)."""
+    load_env()
+    return os.getenv(name, "").strip() or default
 
 
 def clear_settings_cache() -> None:
@@ -60,46 +73,23 @@ def clear_settings_cache() -> None:
     load_screener_config.cache_clear()
 
 
-def save_notification_flags(*, email_enabled: bool, wpush_enabled: bool) -> None:
-    """Update notification channel toggles in settings.yaml."""
-    import re
-
-    path = project_root() / "config" / "settings.yaml"
-    content = path.read_text(encoding="utf-8")
-    content = re.sub(
-        r"^(\s*)email_enabled:\s*\S+",
-        rf"\1email_enabled: {str(email_enabled).lower()}",
-        content,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    content = re.sub(
-        r"^(\s*)wechat_enabled:\s*\S+",
-        rf"\1wechat_enabled: {str(wpush_enabled).lower()}",
-        content,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    path.write_text(content, encoding="utf-8")
-    clear_settings_cache()
-
-
 def db_path() -> Path:
-    settings = load_settings()
-    rel = settings.get("database", {}).get("path", "data/quant_picker.db")
-    path = project_root() / rel
+    rel = env("QUANT_PICKER_DB_PATH") or load_settings().get("database", {}).get(
+        "path", "data/quant_picker.db"
+    )
+    path = Path(rel)
+    if not path.is_absolute():
+        path = project_root() / path
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def database_url() -> str:
     """Resolve SQLAlchemy URL: DATABASE_URL env > settings.database.url > SQLite file."""
-    load_env()
-    env_url = os.getenv("DATABASE_URL", "").strip()
+    env_url = env("DATABASE_URL")
     if env_url:
         return env_url
-    settings = load_settings()
-    cfg_url = (settings.get("database", {}) or {}).get("url", "")
+    cfg_url = (load_settings().get("database", {}) or {}).get("url", "")
     if cfg_url:
         return str(cfg_url).strip()
     return f"sqlite:///{db_path()}"
@@ -107,12 +97,42 @@ def database_url() -> str:
 
 def database_schema() -> str:
     """PostgreSQL schema for project tables; ignored for SQLite."""
-    settings = load_settings()
-    return str((settings.get("database", {}) or {}).get("schema", "quant_picker"))
+    return env("QUANT_PICKER_DB_SCHEMA") or str(
+        (load_settings().get("database", {}) or {}).get("schema", "quant_picker")
+    )
+
+
+def sqlite_busy_timeout() -> float:
+    """Seconds a SQLite connection waits for a competing writer before failing."""
+    try:
+        return float(env("QUANT_PICKER_SQLITE_TIMEOUT", "30"))
+    except ValueError:
+        return 30.0
+
+
+def pg_idle_transaction_timeout() -> float:
+    """Seconds PostgreSQL keeps an idle-in-transaction connection; 0 disables."""
+    try:
+        return float(env("QUANT_PICKER_PG_IDLE_TX_TIMEOUT", "120"))
+    except ValueError:
+        return 120.0
+
+
+def log_level() -> str:
+    return env("QUANT_PICKER_LOG_LEVEL", "INFO").upper()
+
+
+def scheduler_timezone() -> str:
+    return env("QUANT_PICKER_TIMEZONE") or str(
+        (load_settings().get("scheduler", {}) or {}).get("timezone", "Asia/Shanghai")
+    )
 
 
 def auto_sync_intervals() -> list[str]:
     """Intervals updated by background scheduler; default daily only."""
+    override = env("QUANT_PICKER_AUTO_SYNC_INTERVALS")
+    if override:
+        return [x.strip() for x in override.split(",") if x.strip()]
     intervals = (load_settings().get("scheduler", {}) or {}).get("auto_sync_intervals")
     if intervals:
         return [str(x) for x in intervals]

@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+from quant_picker.auth.guard import current_user_id
 from quant_picker.backtest.oos_quality import oos_sample_warning
 from quant_picker.data.symbol_validate import SymbolNotFoundError, validate_symbol
 from quant_picker.engine.analyzer import Analyzer
@@ -22,12 +23,12 @@ from quant_picker.engine.position_tracker import (
     watchlist_manual_snapshot,
 )
 from quant_picker.portfolio.position_sizer import atr_stop_price, get_position_sizing_config
-from quant_picker.storage.db import get_session_factory, init_db
 from quant_picker.storage.models import WatchlistItem
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.indicators import atr as calc_atr
 from quant_picker.strategies.registry import build_strategy
 from quant_picker.web.charts import price_chart_with_signals
+from quant_picker.web.db_session import web_session
 
 INTERVAL_LABEL = {"1d": "日K", "1h": "时K", "1m": "分K"}
 MARKET_FILTER_LABELS = {"all": "全部", "cn": "A股", "hk": "港股", "us": "美股"}
@@ -140,14 +141,17 @@ def parse_watchlist_id() -> int | None:
     return None
 
 
-@st.cache_resource
-def session_factory():
-    init_db()
-    return get_session_factory()
-
-
 def repo() -> Repository:
-    return Repository(session_factory()())
+    """Repository scoped to the logged-in user; pages must call require_login first.
+
+    Shares one session across the whole run: a page calls this a dozen times,
+    and a fresh session per call would check out a connection per call.
+    """
+    user_id = current_user_id()
+    if user_id is None:
+        st.error("会话已失效，请重新登录")
+        st.stop()
+    return Repository(web_session(), user_id)
 
 
 def list_name(item: WatchlistItem) -> str:

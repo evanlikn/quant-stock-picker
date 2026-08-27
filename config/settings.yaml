@@ -17,6 +17,7 @@ position_sizing:
   stop_atr_mult: 2.0
 
 scheduler:
+  # 可被 config/.env 的 QUANT_PICKER_TIMEZONE 覆盖
   timezone: "Asia/Shanghai"
   # 各市场日 K 收盘后独立更新与推送（北京时间）
   market_daily_run:
@@ -32,6 +33,7 @@ scheduler:
   # 兼容旧配置；未设置 market_daily_run 时仅用于 A 股
   daily_run_time: "15:35"
   # 后台定时更新周期；默认仅日K。需要 60分/1分 请加入下方列表并重启 scheduler
+  # 可被 config/.env 的 QUANT_PICKER_AUTO_SYNC_INTERVALS 覆盖（逗号分隔）
   auto_sync_intervals:
     - "1d"
   initial_history:
@@ -107,9 +109,9 @@ backtest:
   max_drawdown_warn: 0.30
   adjust_amount_by_confidence: true
 
+# 数据库配置请写在 config/.env（DATABASE_URL / QUANT_PICKER_DB_PATH /
+# QUANT_PICKER_DB_SCHEMA），下面仅作为未配置 .env 时的兜底
 database:
-  # 优先使用环境变量 DATABASE_URL；未设置则使用下方 SQLite 文件
-  # PostgreSQL 示例: postgresql+psycopg://quant_picker:密码@127.0.0.1:5432/quant_picker
   url: ""
   path: "data/quant_picker.db"
   schema: quant_picker

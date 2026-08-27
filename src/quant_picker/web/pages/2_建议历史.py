@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -11,12 +10,14 @@ os.environ.setdefault("QUANT_PICKER_ROOT", _ROOT)
 
 import streamlit as st
 
-from quant_picker.storage.db import get_session_factory, init_db
+from quant_picker.auth.guard import render_sidebar_account, require_login
+from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 
 st.set_page_config(page_title="建议历史", page_icon="📜", layout="wide")
-init_db()
-repo = Repository(get_session_factory()())
+user = require_login()
+render_sidebar_account(user)
+repo = Repository(web_session(), user.id)
 
 st.title("建议历史")
 
