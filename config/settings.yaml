@@ -57,14 +57,15 @@ scheduler:
         - ["00:00", "04:00"]
 
 notifications:
+  # 以下仅是新账号的初始默认值，每个用户可在「推送设置」页各自调整。
+  # 邮箱/APIKEY 等凭据只存在于用户自己的设置里，此处和 .env 都不再提供。
+  #
   # daily_summary: 每个交易日更新后发送一次当日建议（买入/卖出/观望均推送，默认）
   # buy_sell: 与 daily_summary 相同（兼容旧配置）
   # signal_change: 仅当 buy/hold/sell 变化时发送
   trigger: daily_summary
   # 时K/分K 自选的推送方式；日内周期逐根汇总会刷屏，默认仅在信号变化时发送
   intraday_trigger: signal_change
-  email_enabled: true
-  wechat_enabled: true
   batch_per_stock: true
   include_backtest_summary: true
 

@@ -101,14 +101,7 @@ def test_empty_ciphertext_is_not_an_error(session):
     assert decrypt_secret("") is None
 
 
-def test_lost_key_disables_channels_without_falling_back_to_env(session, monkeypatch):
-    """A lost key must not reroute this user's alerts to the shared .env mailbox."""
-    monkeypatch.setenv("SMTP_HOST", "smtp.shared.com")
-    monkeypatch.setenv("SMTP_USER", "shared@example.com")
-    monkeypatch.setenv("SMTP_PASSWORD", "shared-token")
-    monkeypatch.setenv("EMAIL_TO", "shared@example.com")
-    monkeypatch.setenv("WPUSH_APIKEY", "shared-wpush-key")
-
+def test_lost_key_disables_channels_instead_of_sending(session, monkeypatch):
     user = service.create_user(session, username="alice", password="pwd")
     _save(session, user.id)
     _rotate_key(monkeypatch)
@@ -120,8 +113,51 @@ def test_lost_key_disables_channels_without_falling_back_to_env(session, monkeyp
     assert config.needs_recredential
     assert config.email_enabled is False
     assert config.wechat_enabled is False
-    assert config.email.to_addr != "shared@example.com"
-    assert config.wpush.apikey != "shared-wpush-key"
+    assert config.email.password is None
+    assert config.wpush.apikey is None
+
+
+def test_env_credentials_are_never_used(session, monkeypatch):
+    """推送凭据只按用户存库。.env 里的同名变量必须完全不参与解析，
+    否则新用户会继承别人的邮箱和 APIKEY。"""
+    for name, value in {
+        "SMTP_HOST": "smtp.shared.com",
+        "SMTP_PORT": "465",
+        "SMTP_USER": "owner@example.com",
+        "SMTP_PASSWORD": "owner-token",
+        "EMAIL_TO": "owner@example.com",
+        "WPUSH_APIKEY": "owner-wpush-key",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    bob = service.create_user(session, username="bob", password="pwd")
+
+    # 从未打开过设置页
+    config = service.resolve_notify_config(session, bob.id)
+    assert config.email.to_addr is None
+    assert config.wpush.apikey is None
+    assert config.email_enabled is False and config.wechat_enabled is False
+
+    # 打开设置页建行后，也不能被 .env 种子填满
+    row = service.get_or_create_notification_setting(session, bob.id)
+    assert row.smtp_host is None
+    assert row.smtp_user is None
+    assert row.email_to is None
+    assert row.smtp_password_enc is None
+    assert row.wpush_apikey_enc is None
+    assert row.email_enabled is False and row.wechat_enabled is False
+
+
+def test_one_user_credentials_do_not_leak_to_another(session):
+    alice = service.create_user(session, username="alice", password="pwd")
+    bob = service.create_user(session, username="bob", password="pwd")
+    _save(session, alice.id)
+
+    bob_cfg = service.resolve_notify_config(session, bob.id)
+
+    assert bob_cfg.email.to_addr != "me@example.com"
+    assert bob_cfg.wpush.apikey != "wpush-secret-key"
+    assert bob_cfg.email.to_addr is None and bob_cfg.wpush.apikey is None
 
 
 def test_audit_reports_users_whose_credentials_are_orphaned(session, monkeypatch):

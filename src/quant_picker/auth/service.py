@@ -16,8 +16,6 @@ from quant_picker.notifications.credentials import (
     WPUSH_CHANNEL,
     EmailCredentials,
     WPushCredentials,
-    email_credentials_from_env,
-    wpush_credentials_from_env,
 )
 from quant_picker.security.crypto import (
     SecretUndecryptable,
@@ -45,8 +43,7 @@ class UserNotifyConfig:
     email: EmailCredentials
     wpush: WPushCredentials
     # A stored credential the active key cannot read. The channel is forced off
-    # rather than falling back to .env, which would send this user's alerts to
-    # the shared mailbox.
+    # so the user is told to re-enter it, rather than silently sending nothing.
     email_unreadable: bool = False
     wpush_unreadable: bool = False
 
@@ -165,33 +162,25 @@ def get_notification_setting(
 def get_or_create_notification_setting(
     session: Session, user_id: int
 ) -> UserNotificationSetting:
-    """Fetch the user's row, seeding it from the shared .env on first access.
+    """Fetch the user's row, creating an empty one on first access.
 
-    Before the multi-user split everyone shared one set of credentials in
-    ``.env``. Creating an empty row here would silently switch a working
-    deployment's notifications off, so the first row inherits whatever the
-    global config already had.
+    Credentials are strictly per user: a new account starts with both channels
+    off and no addresses, and stays that way until its owner fills in the
+    「推送设置」form. Nothing is inherited from another account or from the
+    process environment.
     """
     row = get_notification_setting(session, user_id)
     if row is not None:
         return row
 
     defaults = load_settings().get("notifications", {}) or {}
-    env_email = email_credentials_from_env()
-    env_wpush = wpush_credentials_from_env()
     row = UserNotificationSetting(
         user_id=user_id,
-        email_enabled=bool(defaults.get("email_enabled", False)) and env_email.configured,
-        wechat_enabled=bool(defaults.get("wechat_enabled", False)) and env_wpush.configured,
+        email_enabled=False,
+        wechat_enabled=False,
         trigger=str(defaults.get("trigger", "daily_summary")),
         intraday_trigger=str(defaults.get("intraday_trigger", "signal_change")),
-        smtp_host=env_email.host,
-        smtp_port=env_email.port,
-        smtp_user=env_email.user,
-        smtp_password_enc=encrypt_secret(env_email.password),
-        email_to=env_email.to_addr,
-        wpush_apikey_enc=encrypt_secret(env_wpush.apikey if env_wpush.configured else None),
-        wpush_channel=env_wpush.channel,
+        wpush_channel=WPUSH_CHANNEL,
         key_fingerprint=key_fingerprint(),
     )
     session.add(row)
@@ -247,29 +236,24 @@ def save_notification_setting(
 def resolve_notify_config(
     session: Session, user_id: int, defaults: dict[str, Any] | None = None
 ) -> UserNotifyConfig:
-    """Merge the user's row with settings.yaml defaults and the shared .env.
+    """Merge the user's own row with the trigger defaults from settings.yaml.
 
-    The ``.env`` fallback keeps the single-user deployment working after the
-    migration: whoever has not filled in the form yet still sends through the
-    credentials that used to be global.
+    There is deliberately no shared fallback. A user who has not filled in the
+    form sends nothing, rather than borrowing someone else's mailbox or APIKEY.
     """
     defaults = defaults or {}
     default_trigger = str(defaults.get("trigger", "daily_summary"))
     default_intraday = str(defaults.get("intraday_trigger", "signal_change"))
-    env_email = email_credentials_from_env()
-    env_wpush = wpush_credentials_from_env()
 
     row = get_notification_setting(session, user_id)
     if row is None:
         return UserNotifyConfig(
-            email_enabled=bool(defaults.get("email_enabled", False))
-            and env_email.configured,
-            wechat_enabled=bool(defaults.get("wechat_enabled", False))
-            and env_wpush.configured,
+            email_enabled=False,
+            wechat_enabled=False,
             trigger=default_trigger,
             intraday_trigger=default_intraday,
-            email=env_email,
-            wpush=env_wpush,
+            email=EmailCredentials(),
+            wpush=WPushCredentials(),
         )
 
     try:
@@ -305,11 +289,8 @@ def resolve_notify_config(
         wechat_enabled=bool(row.wechat_enabled) and not wpush_unreadable,
         trigger=row.trigger or default_trigger,
         intraday_trigger=row.intraday_trigger or default_intraday,
-        # The .env fallback only covers users who never configured a channel.
-        # An unreadable secret means they did configure one, so falling back
-        # would push their alerts to the shared mailbox.
-        email=email if email.configured or email_unreadable else env_email,
-        wpush=wpush if wpush.configured or wpush_unreadable else env_wpush,
+        email=email,
+        wpush=wpush,
         email_unreadable=email_unreadable,
         wpush_unreadable=wpush_unreadable,
     )
