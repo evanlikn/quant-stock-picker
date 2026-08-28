@@ -97,6 +97,14 @@ class TickFlowProvider:
             raw = tf.klines.get(tf_symbol, **kwargs)
         except Exception as exc:
             if interval != "1d":
+                if market in (Market.US, Market.HK):
+                    hint = (
+                        "港股/美股的分钟/小时 K 线请配置长桥 OpenAPI"
+                        "（LONGBRIDGE_APP_KEY / LONGBRIDGE_APP_SECRET / LONGBRIDGE_ACCESS_TOKEN）。"
+                    )
+                    raise ValueError(
+                        f"获取 {tf_symbol} {interval} 行情失败: {exc}。{hint}"
+                    ) from exc
                 hint = _intraday_error_hint(str(exc))
                 msg = f"获取 {tf_symbol} {interval} 行情失败: {exc}"
                 if hint:

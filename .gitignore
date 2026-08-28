@@ -1,78 +1,72 @@
-# --- 敏感配置（含密钥、密码、API Key）---
-.env
-.env.*
+
 !.env.example
-config/.env
-config/.env.local
-config/.env.*.local
-.streamlit/secrets.toml
-
-# --- 本地数据与数据库 ---
-/data/
-*.db
-*.sqlite
-*.sqlite3
-
+# --- IDE / 编辑器 ---
+# --- Jupyter ---
 # --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-venv/
-env/
-*.egg-info/
-.eggs/
-dist/
-build/
-pip-wheel-metadata/
-*.egg
-
-# --- 测试 / 类型检查 / 格式化缓存 ---
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-.tox/
-.nox/
-coverage.xml
-
 # --- 大文件 / 本地数据导出 ---
-*.parquet
+# --- 操作系统 ---
+# --- 敏感配置（含密钥、密码、API Key）---
+# --- 日志与运行时 ---
+# --- 本地数据与数据库 ---
+# --- 测试 / 类型检查 / 格式化缓存 ---
+*$py.class
+*.7z
+*.csv
+*.db
+*.egg
+*.egg-info/
 *.feather
-*.pkl
-*.pickle
+*.gz
 *.h5
 *.hdf5
-*.csv
-*.xlsx
-*.xls
-*.zip
+*.log
+*.parquet
+*.pickle
+*.pkl
+*.py[cod]
+*.so
+*.sqlite
+*.sqlite3
+*.swo
+*.swp
 *.tar
 *.tar.gz
-*.gz
-*.7z
-
-# --- 日志与运行时 ---
-*.log
+*.xls
+*.xlsx
+*.zip
+*~
+.AppleDouble
+.DS_Store
+.LSOverride
+.Python
+.coverage
+.eggs/
+.env
+.env.*
+.idea/
+.ipynb_checkpoints/
+.mypy_cache/
+.nox/
+.pw-browsers/
+.pytest_cache/
+.ruff_cache/
+.streamlit/secrets.toml
+.tox/
+.venv/
+.vscode/
+/data/
+/tmp/
+Thumbs.db
+__pycache__/
+build/
+config/.env
+config/.env.*.local
+config/.env.local
+coverage.xml
+dist/
+env/
+htmlcov/
 logs/
 nohup.out
-/tmp/
-
-# --- IDE / 编辑器 ---
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# --- 操作系统 ---
-.DS_Store
-.AppleDouble
-.LSOverride
-Thumbs.db
-
-# --- Jupyter ---
-.ipynb_checkpoints/
+pip-wheel-metadata/
+venv/

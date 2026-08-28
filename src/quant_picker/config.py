@@ -122,6 +122,47 @@ def log_level() -> str:
     return env("QUANT_PICKER_LOG_LEVEL", "INFO").upper()
 
 
+def longbridge_app_key() -> str:
+    return env("LONGBRIDGE_APP_KEY")
+
+
+def longbridge_app_secret() -> str:
+    return env("LONGBRIDGE_APP_SECRET")
+
+
+def longbridge_access_token() -> str:
+    return env("LONGBRIDGE_ACCESS_TOKEN")
+
+
+def longbridge_configured() -> bool:
+    """True when OpenAPI key, secret and access token are all present."""
+    return bool(
+        longbridge_app_key() and longbridge_app_secret() and longbridge_access_token()
+    )
+
+
+def web_host() -> str:
+    """Address Streamlit listens on."""
+    host = env("QUANT_PICKER_WEB_HOST")
+    if not host:
+        raise RuntimeError("缺少 QUANT_PICKER_WEB_HOST，请在 config/.env 中配置")
+    return host
+
+
+def web_port() -> int:
+    """Port Streamlit listens on."""
+    raw = env("QUANT_PICKER_WEB_PORT")
+    if not raw:
+        raise RuntimeError("缺少 QUANT_PICKER_WEB_PORT，请在 config/.env 中配置")
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("QUANT_PICKER_WEB_PORT 必须是整数") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("QUANT_PICKER_WEB_PORT 必须在 1-65535 之间")
+    return port
+
+
 def scheduler_timezone() -> str:
     return env("QUANT_PICKER_TIMEZONE") or str(
         (load_settings().get("scheduler", {}) or {}).get("timezone", "Asia/Shanghai")

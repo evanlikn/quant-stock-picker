@@ -35,8 +35,6 @@ _TRIGGER_LABELS = {
     "buy_sell": "每日汇总（等同 daily_summary，兼容旧配置）",
     "signal_change": "仅建议变化（buy/hold/sell 相对上次变化时才推送）",
 }
-_UNCHANGED = "………"
-
 
 def _stored_secret(ciphertext: str | None) -> str | None:
     """Decrypted value, or None when nothing is stored or the key changed."""
@@ -91,9 +89,14 @@ with st.form("notify_form"):
         stored_pwd = _stored_secret(setting.smtp_password_enc)
         smtp_password = st.text_input(
             "发件密码 / 授权码",
-            value=_UNCHANGED if stored_pwd else "",
+            value="",
             type="password",
-            help=f"已保存: {mask_secret(stored_pwd)}" if stored_pwd else "多数邮箱需使用授权码而非登录密码",
+            placeholder="留空则沿用已保存的密码" if stored_pwd else "多数邮箱需填授权码而非登录密码",
+        )
+        st.caption(
+            f"已保存：`{mask_secret(stored_pwd)}`，需要更换时才填写"
+            if stored_pwd
+            else "尚未保存密码"
         )
         email_to = st.text_input("收件邮箱", value=setting.email_to or "")
 
@@ -104,9 +107,14 @@ with st.form("notify_form"):
         stored_key = _stored_secret(setting.wpush_apikey_enc)
         wpush_apikey = st.text_input(
             "WPUSH APIKEY",
-            value=_UNCHANGED if stored_key else "",
+            value="",
             type="password",
-            help=f"已保存: {mask_secret(stored_key)}" if stored_key else "在 wpush.cn 控制台获取",
+            placeholder="留空则沿用已保存的 APIKEY" if stored_key else "在 wpush.cn 个人消息页获取",
+        )
+        st.caption(
+            f"已保存：`{mask_secret(stored_key)}`，需要更换时才填写"
+            if stored_key
+            else "尚未保存 APIKEY"
         )
         st.caption(
             f"推送通道：`{WPUSH_CHANNEL}`（微信公众号模板消息，由 WPUSH 定义，不可修改）"
@@ -144,13 +152,14 @@ with st.form("notify_form"):
             smtp_host=smtp_host,
             smtp_port=int(smtp_port),
             smtp_user=smtp_user,
-            smtp_password=None if smtp_password == _UNCHANGED else smtp_password,
+            smtp_password=smtp_password.strip() or None,
             email_to=email_to,
-            wpush_apikey=None if wpush_apikey == _UNCHANGED else wpush_apikey,
+            wpush_apikey=wpush_apikey.strip() or None,
         )
         st.success("已保存")
         st.rerun()
 
+st.caption("测试发送使用**已保存**的配置。刚改过输入框的话，请先点「保存配置」再测试。")
 test_email_col, test_wpush_col = st.columns(2)
 with test_email_col:
     if st.button("发送邮件测试", use_container_width=True):

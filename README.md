@@ -12,9 +12,11 @@ Python + Streamlit 量化选股程序：自选 Walk-forward 逐股参数优化�
 
 ## 安装
 
+需要 **Python 3.11 或更高**（`python3 --version`）。低于 3.11 时 `pip install` 会报 `No matching distribution found for streamlit>=1.30`，那是 pip 按当前解释器过滤掉了新版本，不是镜像缺包。
+
 ```bash
 cd quant-stock-picker
-python -m venv .venv
+python3.11 -m venv .venv   # 或 python3.12
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
@@ -123,7 +125,7 @@ QUANT_PICKER_SQLITE_TIMEOUT=30
 
 Web 与 scheduler 是两个进程且都会写库，因此连接会自动开启 **WAL**：写入期间读不再被阻塞，同步行情时刷新页面不会报 `database is locked`。剩余的写-写冲突由 `QUANT_PICKER_SQLITE_TIMEOUT` 秒的等待吸收，冲突频繁可调大。
 
-> ⚠️ 从**多用户改造之前**的 SQLite 老库升级时，无法删除表级 `uq_watch` 约束，两个用户不能收藏同一只股票（启动日志会告警）。全新部署不受影响；老库请重建文件或迁移到 PostgreSQL。
+从**多用户改造之前**的 SQLite 老库升级时，首次启动会自动重建 `watchlist_items`：SQLite 没有 `DROP CONSTRAINT`，只能整表替换，把唯一约束从 `(symbol, market, interval)` 换成 `(user_id, symbol, market, interval)`，原有自选归属到初始管理员。整个过程在一个事务里完成，中途失败会回滚，不需要手动干预。
 
 ### PostgreSQL（可选）
 
@@ -146,23 +148,28 @@ PG_SUPERUSER_PASSWORD=你的postgres密码 ./scripts/init_postgres.sh
 
 K 线数据写入 `bars` 表，两种后端都按 `(symbol, market, interval, bar_time)` 去重。
 
-### 行情数据（TickFlow）
+### 行情数据
 
-A 股 / 港股 / 美股统一使用 [TickFlow Python SDK](https://docs.tickflow.org/zh-Hans/sdk/python-quickstart)：
+日 K 与 A 股分钟线走 [TickFlow](https://docs.tickflow.org/zh-Hans/sdk/python-quickstart)；**港股 / 美股的 1 小时、1 分钟 K 线走 [长桥 OpenAPI](https://open.longbridge.com)**。
 
-| 配置 | 能力 |
-|------|------|
-| 未设置 `TICKFLOW_API_KEY` | 免费服务：历史**日K**（适合回测） |
-| 设置 `TICKFLOW_API_KEY` | 完整服务：日K + 60分/1分 K 线 |
+| 市场 | 日K | 1h / 1m |
+|------|-----|---------|
+| A 股 | TickFlow | TickFlow（需 `TICKFLOW_API_KEY`） |
+| 港股、美股 | TickFlow | 长桥（需 App Key + Secret + Access Token） |
 
 ```bash
 # config/.env
-TICKFLOW_API_KEY=your-api-key   # 可选；分钟级 K 线需要
+TICKFLOW_API_KEY=your-api-key          # A 股分钟线；三市日K 免费档也可用
+LONGBRIDGE_APP_KEY=                    # 长桥开发者中心
+LONGBRIDGE_APP_SECRET=
+LONGBRIDGE_ACCESS_TOKEN=               # 与 Key/Secret 一起发放，三项缺一不可
 ```
+
+长桥按自然月限制可查询的标的数量（开户约 100 只，资产越高额度越大），同一标的当月重复拉取只计一次。接口限制约每 30 秒 60 次。历史分钟 K 单次最多 1000 根，首次全量会自动翻页。
 
 ### K 线增量同步
 
-行情数据通过 `BarSyncService` + TickFlow 写入数据库：
+行情数据通过 `BarSyncService` 写入数据库（TickFlow 或长桥，按市场与周期路由）：
 
 | 场景 | 行为 |
 |------|------|
@@ -176,8 +183,7 @@ TICKFLOW_API_KEY=your-api-key   # 可选；分钟级 K 线需要
 
 ```bash
 # 终端 1：Web
-export QUANT_PICKER_ROOT=$(pwd)
-streamlit run src/quant_picker/web/首页.py
+./scripts/run_web.sh
 
 # 终端 2：定时调度（各市场收盘后分别更新日 K 自选）
 export QUANT_PICKER_ROOT=$(pwd)
@@ -187,7 +193,7 @@ python -m quant_picker.scheduler.runner
 python -m quant_picker.scheduler.runner --once
 ```
 
-浏览器访问 http://localhost:8501
+浏览器访问 `http://<QUANT_PICKER_WEB_HOST>:<QUANT_PICKER_WEB_PORT>`；监听地址和端口统一在 `config/.env` 配置。
 
 ### 收盘自动提醒
 
@@ -211,11 +217,17 @@ python -m quant_picker.scheduler.runner --once cn
 
 ## 部署到服务器
 
-在一台干净的 1C2G 机器上从零跑起来。**1. 装依赖**：
+在一台干净的 1C2G 机器上从零跑起来。**1. 装依赖**。先确认 `python3 --version` 是 3.11+；阿里云默认镜像经常是 3.6，需要另装：
 
 ```bash
+# Alibaba Cloud Linux 3 / 较新系统
+dnf install -y python3.11 python3.11-devel gcc
+# 或 Ubuntu
+# apt install -y python3.11 python3.11-venv python3.11-dev build-essential
+
 git clone <repo> && cd quant-stock-picker
-python -m venv .venv && source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -U pip
 pip install -r requirements.txt && pip install -e .
 ```
 
@@ -237,7 +249,7 @@ quant-picker-init
 **4. 前台验证**：
 
 ```bash
-streamlit run src/quant_picker/web/首页.py --server.port 8501 --server.address 0.0.0.0
+./scripts/run_web.sh
 python -m quant_picker.scheduler.runner --once
 ```
 
@@ -253,7 +265,7 @@ After=network.target
 User=quant
 WorkingDirectory=/opt/quant-stock-picker
 Environment=QUANT_PICKER_ROOT=/opt/quant-stock-picker
-ExecStart=/opt/quant-stock-picker/.venv/bin/streamlit run src/quant_picker/web/首页.py --server.port 8501 --server.address 127.0.0.1
+ExecStart=/opt/quant-stock-picker/scripts/run_web.sh
 Restart=always
 
 [Install]
@@ -284,7 +296,7 @@ sudo systemctl enable --now quant-web quant-scheduler
 2G 内存下的注意事项：
 
 - `QUANT_PICKER_AUTO_SYNC_INTERVALS` 保持 `1d`。加入 `1h`/`1m` 会让 K 线量和 walk-forward 开销成倍上升，容易 OOM。
-- Streamlit 只监听 `127.0.0.1`，外部访问用 Nginx 反代加 HTTPS，别把 8501 直接暴露公网。
+- `QUANT_PICKER_WEB_HOST` 建议保持 `127.0.0.1`，外部访问用 Nginx 反代加 HTTPS，不要把 Web 端口直接暴露公网。
 - 需要备份的只有两样：数据库（`data/quant_picker.db`）和 `config/.env`。**密钥丢失后已保存的推送凭据无法解密。**
 
 迁移到另一台机器：拷走 `data/` 和 `config/.env`，重新 `pip install`，其余配置文件跟着仓库走。已有数据库不用再跑 `quant-picker-init`，服务启动时会自行完成结构升级。

@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    inspect,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -458,29 +459,32 @@ def _migrate_watchlist_owner(engine, insp) -> None:
 
     if "user_id" not in cols:
         _run_ddl(engine, [f"ALTER TABLE {table} ADD COLUMN user_id INTEGER"])
-        # Separate transaction, and idempotent, so a crash between the two
-        # leaves rows that the next start still backfills instead of orphaning.
-        with engine.begin() as conn:
-            result = conn.execute(
-                text(f"UPDATE {table} SET user_id = :uid WHERE user_id IS NULL"),
-                {"uid": admin_id},
-            )
+
+    # Runs unconditionally and is idempotent on purpose: a crash between the
+    # ADD COLUMN above and this backfill leaves rows with a NULL owner, and
+    # gating the backfill on the column being absent would mean the next start
+    # skips them forever. Such rows belong to nobody and are invisible to every
+    # query.
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"UPDATE {table} SET user_id = :uid WHERE user_id IS NULL"),
+            {"uid": admin_id},
+        )
+    if result.rowcount:
         logger.warning("已将 %s 条自选归属到初始管理员", result.rowcount)
-        if uses_postgresql():
-            _run_ddl(engine, [f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"])
 
     if not uses_postgresql():
-        # SQLite cannot drop a table-level constraint; a legacy file DB keeps the
-        # old (symbol, market, interval) uniqueness and blocks shared symbols.
-        names = {c["name"] for c in insp.get_unique_constraints("watchlist_items")}
-        if "uq_watch" in names:
-            logger.warning(
-                "SQLite 无法替换 uq_watch 约束，不同用户将无法收藏同一只股票；"
-                "请迁移到 PostgreSQL 或重建数据库文件"
-            )
+        _rebuild_sqlite_watchlist(engine)
         return
 
-    constraints = {c["name"] for c in insp.get_unique_constraints("watchlist_items")}
+    fresh = inspect(engine)
+    owner = next(
+        (c for c in fresh.get_columns("watchlist_items") if c["name"] == "user_id"), None
+    )
+    if owner is not None and owner.get("nullable", True):
+        _run_ddl(engine, [f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"])
+
+    constraints = {c["name"] for c in fresh.get_unique_constraints("watchlist_items")}
     if "uq_watch_user" not in constraints:
         _run_ddl(
             engine,
@@ -493,6 +497,83 @@ def _migrate_watchlist_owner(engine, insp) -> None:
         logger.warning("已将自选唯一约束替换为 uq_watch_user")
 
     _run_ddl(engine, [f"CREATE INDEX IF NOT EXISTS ix_watchlist_user ON {table} (user_id)"])
+
+
+def _rebuild_sqlite_watchlist(engine) -> None:
+    """Swap watchlist_items for a copy carrying the per-user unique constraint.
+
+    Pre-multi-user databases make (symbol, market, interval) unique, so the
+    second user to add 600519 would hit an IntegrityError. SQLite has no
+    DROP CONSTRAINT, and the documented way around that is to rebuild the
+    table. It is safe here because no other table declares a real FOREIGN KEY
+    to watchlist_items -- the rename cannot rewrite anyone else's DDL -- and
+    ids are copied verbatim, so the plain watchlist_id columns elsewhere keep
+    pointing at the same rows.
+    """
+    from sqlalchemy import text
+
+    insp = inspect(engine)
+    names = {c["name"] for c in insp.get_unique_constraints("watchlist_items")}
+    if "uq_watch" not in names:
+        return
+
+    model = WatchlistItem.__table__
+    old_cols = {c["name"] for c in insp.get_columns("watchlist_items")}
+    carried = [c for c in model.columns if c.name in old_cols]
+    target = ", ".join(f'"{c.name}"' for c in carried)
+    source = ", ".join(_legacy_value(c) for c in carried)
+    # Indexes live in the same namespace as the new table's, and they survive
+    # the rename, so drop them before recreating rather than after.
+    stale = [ix["name"] for ix in insp.get_indexes("watchlist_items") if ix.get("name")]
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE watchlist_items RENAME TO _watchlist_items_legacy"))
+        for name in stale:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        model.create(conn)
+        conn.execute(
+            text(
+                f"INSERT INTO watchlist_items ({target}) "
+                f"SELECT {source} FROM _watchlist_items_legacy"
+            )
+        )
+        conn.execute(text("DROP TABLE _watchlist_items_legacy"))
+
+    logger.warning("已重建 watchlist_items，自选唯一约束现为 (user_id, symbol, market, interval)")
+
+
+def _legacy_value(column) -> str:
+    """Read one column out of the old table, substituting the model's default.
+
+    Columns like notify_enabled are NOT NULL in the model but only got their
+    value from SQLAlchemy at insert time, so an older table declares them
+    nullable and real rows do hold NULL. Copying those straight across would
+    abort the whole rebuild on a NOT NULL violation.
+    """
+    quoted = f'"{column.name}"'
+    if column.nullable:
+        return quoted
+
+    default = column.default
+    literal: str | None = None
+    if default is None:
+        literal = None
+    elif getattr(default, "is_callable", False):
+        # datetime.utcnow is the only callable default in this schema
+        literal = "CURRENT_TIMESTAMP" if isinstance(column.type, DateTime) else None
+    elif getattr(default, "is_scalar", False):
+        value = default.arg
+        if isinstance(value, bool):
+            literal = "1" if value else "0"
+        elif isinstance(value, (int, float)):
+            literal = repr(value)
+        else:
+            escaped = str(value).replace("'", "''")
+            literal = f"'{escaped}'"
+
+    if literal is None:
+        return quoted
+    return f"COALESCE({quoted}, {literal})"
 
 
 class MigrationBlocked(RuntimeError):
@@ -529,8 +610,6 @@ def _run_ddl(engine, statements: list[str]) -> None:
 
 def _migrate_schema(engine) -> None:
     """Lightweight column migrations for existing databases."""
-    from sqlalchemy import inspect, text
-
     insp = inspect(engine)
     if not insp.has_table("watchlist_items"):
         return

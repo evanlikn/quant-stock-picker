@@ -128,6 +128,139 @@ def test_concurrent_first_start_is_serialised(fresh_db, monkeypatch, tmp_path):
         assert len(list_users(session)) == 1
 
 
+_LEGACY_WATCHLIST_DDL = """
+CREATE TABLE watchlist_items (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    symbol VARCHAR(32) NOT NULL,
+    display_name VARCHAR(128),
+    market VARCHAR(8) NOT NULL,
+    interval VARCHAR(8) NOT NULL,
+    enabled BOOLEAN,
+    notify_enabled BOOLEAN,
+    wfo_status VARCHAR(16),
+    last_optimized_at DATETIME,
+    last_optimized_bar_time DATETIME,
+    bars_since_optimization INTEGER,
+    retrain_cycle_bars INTEGER,
+    retrain_cycle_source VARCHAR(16),
+    last_bar_time DATETIME,
+    last_run_at DATETIME,
+    added_at DATETIME,
+    history_days INTEGER,
+    position_manual_override BOOLEAN DEFAULT 0,
+    position_entry_price FLOAT DEFAULT 0,
+    position_entry_shares INTEGER DEFAULT 0,
+    position_entry_atr FLOAT,
+    position_entry_bar_time DATETIME,
+    position_trailing_stop FLOAT,
+    CONSTRAINT uq_watch UNIQUE (symbol, market, interval)
+)
+"""
+
+
+@pytest.fixture
+def legacy_sqlite_db(tmp_path, monkeypatch):
+    """A SQLite file written by the single-user version, before user_id existed."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'legacy.db'}")
+    monkeypatch.setenv("QUANT_PICKER_ADMIN_PASSWORD", "s3cret-pass")
+    monkeypatch.setattr(models, "_persist_bootstrap_password", lambda *_: None)
+    models._engine = None
+    models._Session = None
+
+    with models.get_engine().begin() as conn:
+        conn.execute(text(_LEGACY_WATCHLIST_DDL))
+        conn.execute(text("CREATE INDEX ix_watchlist_user ON watchlist_items (symbol)"))
+        conn.execute(
+            text(
+                "INSERT INTO watchlist_items (symbol, market, interval, enabled, added_at) "
+                "VALUES ('600519', 'cn', '1d', 1, '2026-01-01 00:00:00')"
+            )
+        )
+    yield
+    if models._engine is not None:
+        models._engine.dispose()
+    models._engine = None
+    models._Session = None
+
+
+def _add_watch(session, user_id, symbol="600519"):
+    from quant_picker.storage.models import WatchlistItem
+
+    item = WatchlistItem(user_id=user_id, symbol=symbol, market="cn", interval="1d")
+    session.add(item)
+    session.commit()
+    return item
+
+
+def test_legacy_sqlite_lets_two_users_hold_the_same_symbol(legacy_sqlite_db):
+    """The old table made (symbol, market, interval) unique, so the second user
+    to add 600519 was rejected. SQLite has no DROP CONSTRAINT, so the migration
+    has to rebuild the table."""
+    from quant_picker.auth import service
+
+    models.init_db()
+
+    with models.get_session_factory()() as session:
+        constraints = {
+            c["name"]
+            for c in models.inspect(models.get_engine()).get_unique_constraints(
+                "watchlist_items"
+            )
+        }
+        assert "uq_watch" not in constraints
+        assert "uq_watch_user" in constraints
+
+        admin = get_user(session, os.getenv("QUANT_PICKER_ADMIN_USERNAME", "admin"))
+        bob = service.create_user(session, username="bob", password="pwd")
+        _add_watch(session, bob.id)
+
+        owners = session.execute(
+            text("SELECT user_id FROM watchlist_items WHERE symbol = '600519' ORDER BY user_id")
+        ).scalars()
+        assert list(owners) == sorted([admin.id, bob.id])
+
+
+def test_legacy_rows_keep_their_data_and_go_to_the_admin(legacy_sqlite_db):
+    models.init_db()
+
+    with models.get_session_factory()() as session:
+        admin = get_user(session, os.getenv("QUANT_PICKER_ADMIN_USERNAME", "admin"))
+        row = session.execute(
+            text("SELECT user_id, symbol, market, interval, enabled FROM watchlist_items")
+        ).one()
+        assert row.user_id == admin.id
+        assert (row.symbol, row.market, row.interval) == ("600519", "cn", "1d")
+        assert row.enabled
+
+
+def test_legacy_migration_is_idempotent(legacy_sqlite_db):
+    models.init_db()
+    models.init_db()
+
+    with models.get_session_factory()() as session:
+        assert session.execute(text("SELECT COUNT(*) FROM watchlist_items")).scalar() == 1
+        assert (
+            session.execute(
+                text("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%legacy%'")
+            ).scalar()
+            == 0
+        )
+
+
+def test_duplicate_symbol_for_one_user_is_still_rejected(legacy_sqlite_db):
+    """The rebuild must not lose uniqueness altogether, only re-scope it."""
+    from sqlalchemy.exc import IntegrityError
+
+    from quant_picker.auth import service
+
+    models.init_db()
+    with models.get_session_factory()() as session:
+        bob = service.create_user(session, username="bob", password="pwd")
+        _add_watch(session, bob.id)
+        with pytest.raises(IntegrityError):
+            _add_watch(session, bob.id)
+
+
 class TestEnvDrivenConfig:
     def test_database_url_switches_to_postgres(self, monkeypatch):
         url = "postgresql+psycopg://u:p@127.0.0.1:5432/quant_picker"
@@ -154,6 +287,18 @@ class TestEnvDrivenConfig:
         assert config.database_schema() == "custom_schema"
         assert config.scheduler_timezone() == "UTC"
         assert config.auto_sync_intervals() == ["1d", "1h"]
+
+    def test_web_endpoint_comes_from_env(self, monkeypatch):
+        monkeypatch.setenv("QUANT_PICKER_WEB_HOST", "0.0.0.0")
+        monkeypatch.setenv("QUANT_PICKER_WEB_PORT", "8765")
+        assert config.web_host() == "0.0.0.0"
+        assert config.web_port() == 8765
+
+    def test_invalid_web_port_is_rejected(self, monkeypatch):
+        for value in ("bad", "0", "65536"):
+            monkeypatch.setenv("QUANT_PICKER_WEB_PORT", value)
+            with pytest.raises(RuntimeError, match="QUANT_PICKER_WEB_PORT"):
+                config.web_port()
 
     def test_settings_yaml_remains_the_fallback(self, monkeypatch):
         for key in (

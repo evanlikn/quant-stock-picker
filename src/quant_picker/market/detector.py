@@ -42,6 +42,15 @@ def normalize_symbol(symbol: str, market: Market) -> str:
     return s.zfill(6) if market == Market.CN else s.zfill(5)
 
 
+def to_longbridge_symbol(symbol: str, market: Market) -> str:
+    """Convert internal symbol to Longbridge format: ticker.region (e.g. 700.HK)."""
+    if market == Market.US:
+        return f"{normalize_symbol(symbol, market)}.US"
+    if market == Market.HK:
+        return f"{normalize_symbol(symbol, market).lstrip('0') or '0'}.HK"
+    raise ValueError(f"长桥分钟 K 线仅用于港股/美股，不支持 {market}")
+
+
 def to_tickflow_symbol(symbol: str, market: Market) -> str:
     """Convert internal symbol to TickFlow format: CODE.MARKET_SUFFIX."""
     if market == Market.US:

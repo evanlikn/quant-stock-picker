@@ -14,6 +14,7 @@ import streamlit.components.v1 as components
 
 from quant_picker.auth.guard import current_user_id
 from quant_picker.backtest.oos_quality import oos_sample_warning
+from quant_picker.data.bars_util import initial_history_days
 from quant_picker.data.symbol_validate import SymbolNotFoundError, validate_symbol
 from quant_picker.engine.analyzer import Analyzer
 from quant_picker.engine.position_tracker import (
@@ -27,7 +28,7 @@ from quant_picker.storage.models import WatchlistItem
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.indicators import atr as calc_atr
 from quant_picker.strategies.registry import build_strategy
-from quant_picker.web.charts import price_chart_with_signals
+from quant_picker.web.charts import PAN_CHART_CONFIG, price_chart_with_signals
 from quant_picker.web.db_session import web_session
 
 INTERVAL_LABEL = {"1d": "日K", "1h": "时K", "1m": "分K"}
@@ -188,18 +189,44 @@ def config_form(item_id: int, *, after_delete=None) -> None:
         value=int(item.retrain_cycle_bars or 20),
         key=f"dlg_cycle_{item.id}",
     )
+    new_history_days = st.number_input(
+        "历史窗口（天）",
+        min_value=1,
+        value=int(item.history_days or initial_history_days(item.interval)),
+        step=1,
+        key=f"dlg_history_{item.id}",
+        help=(
+            "拉取最近 N 个自然日内的 K 线，与加入自选时的「历史窗口」一致。"
+            "改大后保存会立即重新拉取，因为增量同步只会往后追加。"
+        ),
+    )
     notify_on = st.checkbox("提醒", value=item.notify_enabled, key=f"dlg_notify_{item.id}")
     enabled_on = st.checkbox("定时更新", value=item.enabled, key=f"dlg_enabled_{item.id}")
 
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("保存", type="primary", key=f"dlg_save_{item.id}"):
+            previous_days = int(item.history_days or initial_history_days(item.interval))
             item.retrain_cycle_bars = int(new_cycle)
             item.retrain_cycle_source = "manual"
+            item.history_days = int(new_history_days)
             item.notify_enabled = notify_on
             item.enabled = enabled_on
             r.update_watchlist(item)
-            st.success("已保存")
+            if int(new_history_days) > previous_days:
+                from quant_picker.data.bar_sync import BarSyncService
+
+                with st.spinner(f"重新拉取最近 {int(new_history_days)} 天 K 线..."):
+                    _, inserted = BarSyncService(r).sync(
+                        item.symbol,
+                        item.market,
+                        item.interval,
+                        force_full=True,
+                        item=item,
+                    )
+                st.success(f"已保存，补拉 {inserted} 根 K 线")
+            else:
+                st.success("已保存")
             rerun_watchlist_detail(item.id)
     with c2:
         if st.button("取消", key=f"dlg_cancel_{item.id}"):
@@ -437,10 +464,15 @@ def render_detail(item: WatchlistItem) -> None:
     fig = price_chart_with_signals(
         result.df,
         sig,
-        title=f"{item.symbol} · {chart_strategy} · 最近 120 根",
-        max_bars=120,
+        interval=item.interval,
+        title=(
+            f"{item.symbol} · {chart_strategy} · "
+            f"{INTERVAL_LABEL.get(item.interval, item.interval)}"
+        ),
+        max_bars=500,
+        window_bars=120,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=PAN_CHART_CONFIG)
 
 
 def render_watchlist_detail_page(item_id: int) -> None:

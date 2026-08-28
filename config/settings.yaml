@@ -36,10 +36,12 @@ scheduler:
   # 可被 config/.env 的 QUANT_PICKER_AUTO_SYNC_INTERVALS 覆盖（逗号分隔）
   auto_sync_intervals:
     - "1d"
+  # 仅作为「加入自选」表单里历史窗口输入框的默认值；
+  # 实际拉取天数以每条自选保存的 history_days 为准
   initial_history:
-    "1d": "730d"
-    "1h": "60d"
-    "1m": "5d"
+    "1d": "360d"
+    "1h": "180d"
+    "1m": "60d"
   wfo_retrain_check: true
   allow_manual_retrain: true
   trading_hours:

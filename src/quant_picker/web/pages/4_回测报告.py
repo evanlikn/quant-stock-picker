@@ -22,7 +22,11 @@ from quant_picker.web.db_session import web_session
 from quant_picker.storage.repository import Repository
 from quant_picker.strategies.registry import build_strategy
 from quant_picker.portfolio.position_sizer import get_position_sizing_config
-from quant_picker.web.charts import backtest_dashboard_figure, equity_curve_chart
+from quant_picker.web.charts import (
+    PAN_CHART_CONFIG,
+    backtest_dashboard_figure,
+    equity_curve_chart,
+)
 
 st.set_page_config(page_title="回测报告", page_icon="📊", layout="wide")
 user = require_login()
@@ -71,10 +75,11 @@ if df.empty:
 
 span_days = bars_calendar_span_days(df)
 required_days = effective_history_days(item)
+_ts_fmt = "%Y-%m-%d" if item.interval == "1d" else "%Y-%m-%d %H:%M"
 with info_col:
     st.caption(
         f"本地 K 线：**{len(df)}** 根（连续段）· "
-        f"{df.index.min().strftime('%Y-%m-%d')} ~ {df.index.max().strftime('%Y-%m-%d')} "
+        f"{df.index.min().strftime(_ts_fmt)} ~ {df.index.max().strftime(_ts_fmt)} "
         f"（跨度 {span_days} 天，自选窗口 {required_days} 天）"
     )
 if raw_bar_count > len(df):
@@ -88,14 +93,18 @@ if not bars_cover_history(df, item.interval, history_days=required_days):
         "可能为新上市或历史数据源不完整；回测与 WFO 将基于现有连续段进行。"
     )
 
-default_bars = min(len(df), 500)
-max_bars = st.slider(
-    "K 线展示根数",
-    min_value=60,
-    max_value=max(len(df), 60),
-    value=default_bars,
+max_bars = min(len(df), 1000)
+window_bars = st.slider(
+    "每屏显示 K 线根数",
+    min_value=30,
+    max_value=min(max_bars, 300),
+    value=min(max_bars, 120),
     step=10,
-    help="默认展示全部本地 K 线（最多 500 根）；此前默认 250 根约等于一年",
+    help=(
+        "图表一屏只画这么多根，其余用鼠标左右拖动、滚轮缩放，"
+        "或拖动图表下方的范围条查看。"
+        "注意这是根数不是天数：时K 每个交易日约 7 根，分K 更多。"
+    ),
 )
 
 adaptive = repo.get_adaptive_params(item.symbol, item.market, item.interval, strategy_name)
@@ -194,14 +203,20 @@ with tab_full:
     sell_count = int((signals == "sell").sum())
     st.caption(f"信号统计：买入 {buy_count} 次 · 卖出 {sell_count} 次")
 
+    st.caption(
+        f"图表载入最近 {min(len(df), max_bars)} 根 K 线，每屏显示 {window_bars} 根；"
+        "左右拖动可查看更早区间，滚轮缩放，双击复位。"
+    )
     fig = backtest_dashboard_figure(
         df,
         signals,
         full_report.equity_curve,
+        interval=item.interval,
         title=f"{item.symbol} · {strategy_name} · {item.interval}",
         max_bars=max_bars,
+        window_bars=window_bars,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=PAN_CHART_CONFIG)
 
 with tab_history:
     st.markdown("**历次训练保存的回测快照**")

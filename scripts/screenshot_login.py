@@ -6,8 +6,13 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8599"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/qp_login.png"
+from quant_picker.config import web_host, web_port
+
+host = web_host()
+# 0.0.0.0 is a bind address, not a browser destination.
+browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+BASE = f"http://{browser_host}:{web_port()}"
+OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/qp_login.png"
 
 with sync_playwright() as p:
     browser = p.chromium.launch()
