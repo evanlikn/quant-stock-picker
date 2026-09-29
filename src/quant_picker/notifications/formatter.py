@@ -20,11 +20,24 @@ def _format_price(price: float | None, market: str = "cn") -> str:
     return f"¥{price:,.2f}"
 
 
-def format_wechat_title(item: WatchlistItem) -> str:
+def format_wechat_title(
+    item: WatchlistItem,
+    recommendations: list[Recommendation] | None = None,
+) -> str:
     name = (item.display_name or "").strip()
     if name and name != "—":
-        return f"{item.symbol} {name}"
-    return item.symbol
+        base = f"{item.symbol} {name}"
+    else:
+        base = item.symbol
+
+    actions: list[str] = []
+    for rec in recommendations or []:
+        if rec.action in ("buy", "sell") and rec.action not in actions:
+            actions.append(rec.action)
+    if not actions:
+        return base
+    labels = "/".join(_ACTION_LABEL[a] for a in actions)
+    return f"{base}({labels})"
 
 
 def _format_oos_summary(rec: Recommendation) -> str:

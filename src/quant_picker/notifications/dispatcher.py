@@ -124,7 +124,7 @@ class NotificationDispatcher:
         email_body = format_daily_summary_message(
             item, recommendations, bar_time, reference_price
         )
-        wechat_title = format_wechat_title(item)
+        wechat_title = format_wechat_title(item, recommendations)
         wechat_body = format_wechat_message(
             item, recommendations, bar_time, reference_price
         )
