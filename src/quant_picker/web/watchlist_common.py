@@ -287,8 +287,8 @@ def position_form(item_id: int) -> None:
         f"{INTERVAL_LABEL.get(item.interval, item.interval)}"
     )
     st.caption(
-        "保存后，该股票所有策略共用此持仓；买入价和股数都设为 0 表示已清仓，"
-        "将恢复为各策略独立记录建议持仓。"
+        "保存后，该股票各策略先共用此持仓；买入价和股数都设为 0 表示已清仓，"
+        "将恢复为各策略独立记录建议持仓。某个策略给出卖出后，只将该策略持仓记为 0。"
         f" 移动止损 = max(历史止损, 收盘 − {cfg['stop_atr_mult']:.0f}×最新ATR)，只升不降。"
     )
 

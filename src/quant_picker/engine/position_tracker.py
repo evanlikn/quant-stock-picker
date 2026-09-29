@@ -59,11 +59,16 @@ def resolve_position(
     watchlist_id: int,
     strategy_name: str,
 ) -> PositionSnapshot | None:
+    row = repo.get_strategy_position(watchlist_id, strategy_name)
+    # A zero-share row means this strategy has sold and must not inherit the
+    # stock-level manual cost that the other strategies still share.
+    if row is not None and row.entry_shares <= 0:
+        return None
     item = repo.get_watchlist_by_id(watchlist_id)
     manual = watchlist_manual_snapshot(item)
     if manual is not None:
         return manual
-    return strategy_position_snapshot(repo.get_strategy_position(watchlist_id, strategy_name))
+    return strategy_position_snapshot(row)
 
 
 def atr_at_bar(
@@ -204,11 +209,24 @@ class PositionTracker:
         entry_atr: float | None,
         bar_time: datetime | None,
     ) -> None:
-        """Update stored position from finalized daily signal."""
+        """Update stored position from finalized daily signal.
+
+        A sell closes only this strategy. The stock-level manual cost stays,
+        so the other strategies keep the shares the user entered.
+        """
         item = self.repo.get_watchlist_by_id(watchlist_id)
         if item and item.position_manual_override:
             if signal.action == "sell":
-                self.repo.clear_watchlist_manual_position(watchlist_id)
+                self.repo.upsert_strategy_position(
+                    watchlist_id,
+                    strategy_name,
+                    entry_price=0.0,
+                    entry_shares=0,
+                    entry_atr=None,
+                    entry_bar_time=bar_time,
+                    manual_override=False,
+                    trailing_stop=None,
+                )
             return
 
         existing = self.repo.get_strategy_position(watchlist_id, strategy_name)

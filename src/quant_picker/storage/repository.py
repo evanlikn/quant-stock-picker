@@ -644,6 +644,14 @@ class Repository:
         item.position_entry_atr = entry_atr
         item.position_entry_bar_time = entry_bar_time
         item.position_trailing_stop = trailing_stop
+        # Re-saving the shared cost brings every strategy back onto it,
+        # including ones previously marked flat by a sell.
+        self.session.execute(
+            delete(StrategyPosition).where(
+                StrategyPosition.watchlist_id == watchlist_id,
+                StrategyPosition.entry_shares <= 0,
+            )
+        )
         self.session.commit()
         self.session.refresh(item)
         return item
