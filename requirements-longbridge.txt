@@ -1,0 +1,4 @@
+# 可选：港股/美股的 1 小时、1 分钟 K 线。
+# 仅提供 manylinux_2_39 wheel，需 Linux glibc >= 2.39（ldd --version 查看），
+# 否则 pip 会报 "No matching distribution found for longbridge>=4"。
+longbridge>=4

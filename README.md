@@ -165,6 +165,14 @@ LONGBRIDGE_APP_SECRET=
 LONGBRIDGE_ACCESS_TOKEN=               # 与 Key/Secret 一起发放，三项缺一不可
 ```
 
+长桥 SDK 是**可选依赖**，单独安装：
+
+```bash
+pip install -r requirements-longbridge.txt
+```
+
+它只发 `manylinux_2_39` 的 wheel，**要求 Linux glibc ≥ 2.39**（Ubuntu 24.04+、Debian 13+、Fedora 40+）。老系统（Alibaba Cloud Linux 3 是 2.32，Ubuntu 22.04 是 2.35）上 pip 会把所有 4.x/5.x 过滤掉，只剩不可用的 0.2.x，报 `No matching distribution found for longbridge>=4`。用 `ldd --version | head -1` 查看 glibc 版本。装不上就别装：日 K 与 A 股分钟线完全不受影响，只是港股/美股的 1h、1m 不可用。
+
 长桥按自然月限制可查询的标的数量（开户约 100 只，资产越高额度越大），同一标的当月重复拉取只计一次。接口限制约每 30 秒 60 次。历史分钟 K 单次最多 1000 根，首次全量会自动翻页。
 
 ### K 线增量同步
