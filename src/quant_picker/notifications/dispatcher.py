@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from quant_picker.config import load_env, load_settings, scheduler_timezone
@@ -162,7 +163,8 @@ class NotificationDispatcher:
         if not changes:
             return
 
-        title = f"量化选股 {item.symbol} 建议变化"
+        email_title = f"量化选股 {item.symbol} 建议变化"
+        wechat_title = format_wechat_title(item, new_recommendations)
         body = format_change_message(
             item, changes, reference_price=reference_price, bar_time=bar_time
         )
@@ -173,7 +175,7 @@ class NotificationDispatcher:
                 "email",
                 item.id,
                 change_bar_time,
-                lambda: self.email.send(config.email, title, body),
+                lambda: self.email.send(config.email, email_title, body),
             )
 
         if config.wechat_enabled:
@@ -181,7 +183,7 @@ class NotificationDispatcher:
                 "wpush",
                 item.id,
                 change_bar_time,
-                lambda: self.wpush.send(config.wpush, title, body),
+                lambda: self.wpush.send(config.wpush, wechat_title, body),
             )
 
     def send_test_email(self, user_id: int) -> SendResult:
@@ -197,7 +199,10 @@ class NotificationDispatcher:
 
     def send_test_wpush(self, user_id: int) -> SendResult:
         config = self._notify_config(user_id)
-        title = "600519 贵州茅台"
+        title = format_wechat_title(
+            SimpleNamespace(symbol="600519", display_name="贵州茅台"),
+            [SimpleNamespace(action="buy"), SimpleNamespace(action="hold")],
+        )
         body = (
             "2026-07-14  收盘 ¥1688.00\n"
             "\n"

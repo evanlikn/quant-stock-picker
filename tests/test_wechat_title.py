@@ -8,7 +8,7 @@ from quant_picker.notifications.formatter import format_wechat_title
 
 
 def _item(symbol="600519", display_name="贵州茅台"):
-    return SimpleNamespace(symbol=symbol, display_name=display_name)
+    return SimpleNamespace(symbol=symbol, display_name=display_name, market="cn")
 
 
 def _rec(action: str):
